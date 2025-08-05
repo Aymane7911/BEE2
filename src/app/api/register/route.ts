@@ -1,391 +1,503 @@
-import { NextResponse } from 'next/server';
-import { masterDb, getAdminDatabaseConnection } from '@/lib/database-connection';
-import nodemailer from 'nodemailer';
-import { randomUUID } from 'crypto';
+// app/api/admin/register/route.ts - Schema-per-Tenant Version
+import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import { NextRequest, NextResponse } from 'next/server';
+import { Client } from 'pg';
+import { execSync } from 'child_process';
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASSWORD,
-  },
+// Initialize Prisma for public schema (admin management)
+const prisma = new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
 });
 
-export async function POST(request: Request) {
+// Test database connection on startup
+async function testPrismaConnection() {
   try {
-    const body = await request.json();
+    await prisma.$connect();
+    console.log('✅ Prisma connection established successfully');
+    return true;
+  } catch (error: any) {
+    console.error('❌ Prisma connection failed:', error.message);
+    console.error('   Make sure your DATABASE_URL is correct and the database is running');
+    return false;
+  }
+}
 
-    // Get base URL from request headers
-    const host = request.headers.get('host');
-    const protocol = request.headers.get('x-forwarded-proto') || 'http';
-    const baseUrl = process.env.BASE_URL || `${protocol}://${host}`;
+// Types
+interface AdminRegistrationRequest {
+  firstname: string;
+  lastname: string;
+  email?: string;
+  phonenumber?: string;
+  password: string;
+  adminCode: string;
+  role: 'admin' | 'super_admin';
+  schema?: {
+    name?: string;
+    displayName?: string;
+    description?: string;
+    maxUsers?: number;
+    maxStorage?: number;
+  };
+}
 
-    const {
-      firstname,
-      lastname,
-      email,
-      phonenumber,
-      password,
-      databaseId,
-      databaseName,
-      inviteCode,
-      role = 'employee', // Default role for regular users
-      useEmail = true, // Frontend sends this to indicate email/phone preference
+interface AdminRegistrationResponse {
+  success: boolean;
+  message?: string;
+  error?: string;
+  data?: {
+    admin: {
+      id: number;
+      firstname: string;
+      lastname: string;
+      email: string;
+      role: string;
+      schemaName: string;
+      createdAt: Date;
+    };
+    adminUser: {
+      id: number;
+      firstname: string;
+      lastname: string;
+      email: string;
+      role: string;
+      isAdmin: boolean;
+      adminId: number | null;
+      createdAt: Date;
+    };
+  };
+}
+
+// Admin authorization codes
+const ADMIN_CODES: Record<string, string> = {
+  super_admin: process.env.SUPER_ADMIN_CODE || 'super_admin_2024_secure',
+  admin: process.env.ADMIN_CODE || 'admin_2024_secure'
+};
+
+// Generate unique schema name
+function generateSchemaName(firstname: string, lastname: string): string {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 8);
+  return `${firstname.toLowerCase()}_${lastname.toLowerCase()}_${timestamp}_${random}`;
+}
+
+// Create schema in database
+async function createSchema(schemaName: string): Promise<void> {
+  console.log(`🗄️ Creating schema: ${schemaName}`);
+  
+  const client = new Client({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432'),
+    user: process.env.DB_ADMIN_USER || 'postgres',
+    password: process.env.DB_ADMIN_PASSWORD,
+    database: process.env.DB_NAME || 'postgres'
+  });
+
+  try {
+    await client.connect();
+    console.log('✅ Connected to database for schema creation');
+    
+    // Check if schema already exists
+    const existingSchemaResult = await client.query(
+      'SELECT 1 FROM information_schema.schemata WHERE schema_name = $1',
+      [schemaName]
+    );
+    
+    if (existingSchemaResult.rows.length > 0) {
+      throw new Error(`Schema '${schemaName}' already exists`);
+    }
+    
+    // Create the schema
+    await client.query(`CREATE SCHEMA "${schemaName}"`);
+    console.log(`✅ Schema '${schemaName}' created successfully`);
+    
+  } catch (error: any) {
+    console.error('❌ Schema creation error:', error.message);
+    throw new Error(`Failed to create schema: ${error.message}`);
+  } finally {
+    await client.end();
+  }
+}
+
+// Apply schema migrations to the new schema
+async function applySchemaToNewSchema(schemaName: string): Promise<void> {
+  try {
+    console.log(`📋 Applying schema migrations to: ${schemaName}`);
+    
+    // Create a temporary DATABASE_URL for the specific schema
+    const baseUrl = process.env.DATABASE_URL;
+    const schemaUrl = `${baseUrl}?schema=${schemaName}`;
+    
+    execSync(`npx prisma db push --schema=./prisma/schema.prisma --accept-data-loss --skip-generate`, {
+      stdio: 'inherit',
+      env: { 
+        ...process.env, 
+        DATABASE_URL: schemaUrl,
+        CI: 'true'
+      },
+      timeout: 45000
+    });
+    
+    console.log(`✅ Schema applied successfully to: ${schemaName}`);
+    
+  } catch (error: any) {
+    console.error(`❌ Failed to apply schema to ${schemaName}:`, error.message);
+    throw new Error(`Failed to apply schema to "${schemaName}": ${error.message}`);
+  }
+}
+
+// Create admin as user in beeusers table within the schema
+async function createAdminAsUserInSchema(
+  schemaName: string,
+  adminId: number,
+  adminData: {
+    firstname: string;
+    lastname: string;
+    email: string;
+    password: string;
+    role: string;
+  }
+): Promise<any> {
+  // Create connection URL for the specific schema
+  const baseUrl = process.env.DATABASE_URL;
+  const schemaUrl = `${baseUrl}?schema=${schemaName}`;
+
+  const schemaPrisma = new PrismaClient({
+    datasources: {
+      db: {
+        url: schemaUrl,
+      },
+    },
+  });
+
+  try {
+    await schemaPrisma.$connect();
+    console.log(`✅ Connected to schema '${schemaName}' for user creation`);
+
+    // Create admin as a user in beeusers table within the schema
+    const adminUser = await schemaPrisma.beeusers.create({
+      data: {
+        firstname: adminData.firstname,
+        lastname: adminData.lastname,
+        email: adminData.email,
+        password: adminData.password,
+        role: 'admin', // Set role as admin in beeusers
+        isAdmin: true, // Mark as admin
+        adminId: adminId, // Reference to admin table (in public schema)
+        isConfirmed: true, // Auto-confirm admin users
+        isProfileComplete: true, // Mark profile as complete
+      }
+    });
+
+    console.log(`✅ Admin created as user in schema '${schemaName}' with ID: ${adminUser.id}`);
+    return adminUser;
+
+  } catch (error: any) {
+    console.error('❌ Failed to create admin as user in schema:', error.message);
+    throw new Error(`Failed to create admin as user in schema: ${error.message}`);
+  } finally {
+    await schemaPrisma.$disconnect();
+  }
+}
+
+// Initialize new schema with admin user
+async function initializeNewSchema(
+  schemaName: string,
+  adminId: number,
+  adminData: {
+    firstname: string;
+    lastname: string;
+    email: string;
+    password: string;
+    role: string;
+  }
+): Promise<{ adminUser: any }> {
+  try {
+    console.log(`🔧 Initializing schema '${schemaName}' with admin user...`);
+    
+    // Create admin as a user in beeusers table within the schema
+    console.log('👥 Creating admin as user in beeusers table within schema...');
+    const adminUser = await createAdminAsUserInSchema(
+      schemaName,
+      adminId,
+      adminData
+    );
+    
+    console.log(`✅ Schema '${schemaName}' initialized successfully with admin user`);
+    return { adminUser };
+    
+  } catch (error: any) {
+    console.error('❌ Schema initialization failed:', error.message);
+    throw new Error(`Failed to initialize schema: ${error.message}`);
+  }
+}
+
+function validateRequest(data: Partial<AdminRegistrationRequest>): string | null {
+  if (!data.firstname || !data.lastname || !data.password || !data.adminCode || !data.role) {
+    return 'Missing required fields';
+  }
+
+  if (!data.email && !data.phonenumber) {
+    return 'Either email or phone number is required';
+  }
+
+  if (!['admin', 'super_admin'].includes(data.role)) {
+    return 'Invalid role specified';
+  }
+
+  if (data.password.length < 8) {
+    return 'Password must be at least 8 characters long';
+  }
+
+  if (data.adminCode !== ADMIN_CODES[data.role]) {
+    return 'Invalid admin authorization code';
+  }
+
+  return null;
+}
+
+export async function POST(request: NextRequest): Promise<NextResponse<AdminRegistrationResponse>> {
+  console.log('🚀 Starting admin registration process (Schema-per-Tenant)...');
+  
+  // Test database connection first
+  const connectionTest = await testPrismaConnection();
+  if (!connectionTest) {
+    return NextResponse.json<AdminRegistrationResponse>(
+      { 
+        success: false, 
+        error: 'Database connection failed. Please check your database configuration and ensure the database server is running.' 
+      },
+      { status: 500 }
+    );
+  }
+  
+  try {
+    const body: AdminRegistrationRequest = await request.json();
+    
+    const { 
+      firstname, 
+      lastname, 
+      email, 
+      phonenumber, 
+      password, 
+      adminCode, 
+      role,
+      schema 
     } = body;
 
-    console.log('Registration request received:', {
-      firstname,
-      lastname,
-      email: email ? 'provided' : 'not provided',
-      phonenumber: phonenumber ? 'provided' : 'not provided',
-      useEmail,
-      role,
-      hasInviteCode: !!inviteCode,
-      databaseId,
-      databaseName
-    });
-
-    // Validate required fields
-    if (!firstname?.trim() || !lastname?.trim() || !password) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'First name, last name, and password are required.' 
-      }, { status: 400 });
-    }
-
-    // Validate contact information based on frontend preference
-    if (useEmail) {
-      if (!email?.trim()) {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Email address is required.' 
-        }, { status: 400 });
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Please enter a valid email address.' 
-        }, { status: 400 });
-      }
-    } else {
-      if (!phonenumber?.trim()) {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Phone number is required.' 
-        }, { status: 400 });
-      }
-      if (phonenumber.length < 10) {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Please enter a valid phone number.' 
-        }, { status: 400 });
-      }
-    }
-
-    // Password validation
-    if (password.length < 8) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Password must be at least 8 characters long.' 
-      }, { status: 400 });
-    }
-
-    // Role validation for regular users (not admins)
-    const validRoles = ['employee', 'manager', 'admin'];
-    if (!validRoles.includes(role)) {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'Invalid role specified.' 
-      }, { status: 400 });
-    }
-
-    let dbInstance;
-    let registrationMethod = '';
-
-    // PRIORITY 1: Handle direct database specification
-    if (databaseId?.trim() || databaseName?.trim()) {
-      registrationMethod = 'direct_database';
-      
-      // Query master database for database instance
-      dbInstance = await masterDb.database.findFirst({
-        where: {
-          OR: [
-            { id: databaseId?.trim() },
-            { displayName: databaseName?.trim() },
-            { name: databaseName?.trim() }
-          ],
-          isActive: true,
-        },
-      });
-
-      if (!dbInstance) {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Database not found or inactive.' 
-        }, { status: 404 });
-      }
-      
-      console.log(`Using directly specified database: ${dbInstance.id} (${dbInstance.displayName || dbInstance.name})`);
-    } 
-    // PRIORITY 2: Use default database (typically the first active one)
-    else {
-      registrationMethod = 'default_database';
-      
-      // Look for any active database in master database
-      dbInstance = await masterDb.database.findFirst({
-        where: {
-          isActive: true
-        },
-        orderBy: { createdAt: 'asc' }
-      });
-
-      if (!dbInstance) {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'No active database available for registration. Please contact support.' 
-        }, { status: 500 });
-      }
-      
-      console.log(`Using default database: ${dbInstance.id} (${dbInstance.displayName || dbInstance.name})`);
-    }
-
-    // Get connection to the target database
-    console.log(`Connecting to target database: ${dbInstance.id}`);
-    const { db: targetDb } = await getAdminDatabaseConnection({
-      databaseId: dbInstance.id,
-      databaseUrl: dbInstance.databaseUrl
-    });
-
-    // Check for existing users in the target database
-    console.log(`Checking for existing users in database: ${dbInstance.id}`);
-    
-    let existingUser = null;
-    let conflictField = '';
-
-    // Check the primary contact method first
-    if (useEmail && email?.trim()) {
-      existingUser = await targetDb.beeusers.findFirst({
-        where: {
-          databaseId: dbInstance.id,
-          email: email.trim()
-        }
-      });
-      if (existingUser) conflictField = 'email';
-    } else if (!useEmail && phonenumber?.trim()) {
-      existingUser = await targetDb.beeusers.findFirst({
-        where: {
-          databaseId: dbInstance.id,
-          phonenumber: phonenumber.trim()
-        }
-      });
-      if (existingUser) conflictField = 'phone number';
-    }
-
-    if (existingUser) {
-      return NextResponse.json({ 
-        success: false, 
-        error: `An account already exists with that ${conflictField} in ${dbInstance.displayName || dbInstance.name}.` 
-      }, { status: 400 });
-    }
-
-    // Check user count limit
-    const currentUserCount = await targetDb.beeusers.count({
-      where: { databaseId: dbInstance.id }
-    });
-
-    if (dbInstance.maxUsers && currentUserCount >= dbInstance.maxUsers) {
-      return NextResponse.json({ 
-        success: false, 
-        error: `${dbInstance.displayName || dbInstance.name} has reached its maximum user limit of ${dbInstance.maxUsers}.` 
-      }, { status: 400 });
-    }
-
-    // Hash password and generate confirmation token
-    const hashedPassword = await bcrypt.hash(password, 12);
-    const confirmationToken = randomUUID();
-    
-    // Email confirmation is required if email is provided
-    const requiresConfirmation = email?.trim() ? true : false;
-
-    // Create user in the target database
-    const result = await targetDb.$transaction(async (tx) => {
-      console.log(`Creating user in database: ${dbInstance.id}`);
-      
-      const newUser = await tx.beeusers.create({
-        data: {
-          firstname: firstname.trim(),
-          lastname: lastname.trim(),
-          email: email?.trim() || '',
-          phonenumber: phonenumber?.trim() || null,
-          password: hashedPassword,
-          confirmationToken: requiresConfirmation ? confirmationToken : null,
-          isConfirmed: !requiresConfirmation,
-          role,
-          isProfileComplete: false,
-          databaseId: dbInstance.id,
-        },
-      });
-
-      // Create token stats
-      await tx.tokenStats.create({
-        data: {
-          userId: newUser.id,
-          totalTokens: 0,
-          remainingTokens: 0,
-          originOnly: 0,
-          qualityOnly: 0,
-          bothCertifications: 0,
-          databaseId: dbInstance.id,
-        },
-      });
-
-      return { newUser, dbInstance, requiresConfirmation, registrationMethod };
-    });
-
-    // Send welcome email if email is provided
-    if (email?.trim()) {
-      await sendWelcomeEmail(
-        result.dbInstance, 
-        result.newUser, 
-        confirmationToken, 
-        result.requiresConfirmation, 
-        baseUrl,
-        result.registrationMethod
+    // Validation
+    const validationError = validateRequest(body);
+    if (validationError) {
+      return NextResponse.json(
+        { success: false, error: validationError },
+        { status: 400 }
       );
     }
 
-    console.log(`User ${result.newUser.email || result.newUser.phonenumber} successfully registered in database ${result.dbInstance.id} via ${result.registrationMethod}`);
+    // Prepare admin email
+    const adminEmail = email || `${phonenumber}@phone.local`;
 
-    // Return response matching frontend expectations
-    return NextResponse.json({
+    // Generate unique schema name
+    const schemaName = schema?.name || generateSchemaName(firstname, lastname);
+    
+    // Prepare schema configuration
+    const schemaConfig = {
+      name: schemaName,
+      displayName: schema?.displayName || `${firstname} ${lastname}'s Workspace`,
+      description: schema?.description || `Workspace managed by ${firstname} ${lastname}`,
+      maxUsers: schema?.maxUsers || 1000,
+      maxStorage: schema?.maxStorage || 10.0
+    };
+
+    console.log('📝 Schema config:', schemaConfig);
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    let createdAdmin: any;
+    let adminUser: any;
+
+    try {
+      // Step 1: Create admin in public schema (for global admin management)
+      console.log('👤 Creating admin in public schema...');
+      createdAdmin = await prisma.admin.create({
+        data: {
+          firstname,
+          lastname,
+          email: adminEmail,
+          password: hashedPassword,
+          role,
+          schemaName: schemaName,
+          displayName: schemaConfig.displayName,
+          description: schemaConfig.description,
+          maxUsers: schemaConfig.maxUsers,
+          maxStorage: schemaConfig.maxStorage,
+          isActive: true,
+        }
+      });
+      console.log(`✅ Admin created in public schema with ID: ${createdAdmin.id}`);
+
+      // Step 2: Create schema
+      console.log('🗄️ Creating schema...');
+      await createSchema(schemaName);
+      console.log('✅ Schema created successfully');
+
+      // Step 3: Apply schema migrations to new schema
+      console.log('📋 Applying schema migrations to new schema...');
+      await applySchemaToNewSchema(schemaName);
+      console.log('✅ Schema migrations applied successfully');
+
+      // Step 4: Initialize the new schema with admin user
+      console.log('🔧 Initializing new schema with admin user...');
+      const initResult = await initializeNewSchema(
+        schemaName,
+        createdAdmin.id,
+        {
+          firstname,
+          lastname,
+          email: adminEmail,
+          password: hashedPassword,
+          role
+        }
+      );
+      
+      adminUser = initResult.adminUser;
+      console.log('✅ New schema initialized successfully');
+
+    } catch (error: any) {
+      console.error('❌ Registration process failed:', error.message);
+      
+      // Cleanup: Try to remove the schema if it was created
+      try {
+        console.log('🧹 Attempting to cleanup created schema...');
+        const client = new Client({
+          host: process.env.DB_HOST || 'localhost',
+          port: parseInt(process.env.DB_PORT || '5432'),
+          user: process.env.DB_ADMIN_USER || 'postgres',
+          password: process.env.DB_ADMIN_PASSWORD,
+          database: process.env.DB_NAME || 'postgres'
+        });
+        
+        await client.connect();
+        await client.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
+        await client.end();
+        console.log('✅ Schema cleanup completed');
+      } catch (cleanupError) {
+        console.error('❌ Schema cleanup failed:', cleanupError);
+      }
+
+      // Cleanup: Remove admin from public schema if created
+      if (createdAdmin) {
+        try {
+          await prisma.admin.delete({ where: { id: createdAdmin.id } });
+          console.log('✅ Public schema admin cleanup completed');
+        } catch (cleanupError) {
+          console.error('❌ Public schema admin cleanup failed:', cleanupError);
+        }
+      }
+      
+      throw error;
+    }
+
+    console.log('🎉 Admin registration completed successfully!');
+
+    return NextResponse.json<AdminRegistrationResponse>({
       success: true,
-      message: result.requiresConfirmation
-        ? `Account created in ${result.dbInstance.displayName || result.dbInstance.name}! Please check your email to confirm.`
-        : `Account created successfully! Welcome to ${result.dbInstance.displayName || result.dbInstance.name}.`,
-      userId: result.newUser.id,
-      databaseId: result.dbInstance.id,
-      displayName: result.dbInstance.displayName || result.dbInstance.name,
-      requiresConfirmation: result.requiresConfirmation,
-      registrationMethod: result.registrationMethod,
-      // Frontend expects these for routing decisions
-      user: {
-        id: result.newUser.id,
-        firstname: result.newUser.firstname,
-        lastname: result.newUser.lastname,
-        email: result.newUser.email,
-        role: result.newUser.role
+      message: `Admin account and schema '${schemaName}' created successfully. Admin registered in public schema and added as user in their own schema.`,
+      data: {
+        admin: {
+          id: createdAdmin.id,
+          firstname: createdAdmin.firstname,
+          lastname: createdAdmin.lastname,
+          email: createdAdmin.email,
+          role: createdAdmin.role,
+          schemaName: createdAdmin.schemaName,
+          createdAt: createdAdmin.createdAt
+        },
+        adminUser: {
+          id: adminUser.id,
+          firstname: adminUser.firstname,
+          lastname: adminUser.lastname,
+          email: adminUser.email,
+          role: adminUser.role,
+          isAdmin: adminUser.isAdmin,
+          adminId: adminUser.adminId,
+          createdAt: adminUser.createdAt
+        }
       }
     }, { status: 201 });
 
-  } catch (error) {
-    console.error('Error during registration:', error);
+  } catch (error: any) {
+    console.error('❌ Admin registration error:', error);
+
+    if (error.message.includes('connection') || error.message.includes('Authentication failed')) {
+      return NextResponse.json<AdminRegistrationResponse>(
+        { 
+          success: false, 
+          error: 'Database connection failed. Please check your database configuration.' 
+        },
+        { status: 500 }
+      );
+    }
     
-    // More specific error handling
-    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
-      return NextResponse.json({ 
-        success: false, 
-        error: 'An account with this information already exists.' 
-      }, { status: 400 });
+    if (error.message.includes('Schema creation failed') || error.message.includes('Failed to create schema')) {
+      return NextResponse.json<AdminRegistrationResponse>(
+        { success: false, error: 'Failed to create schema. Please contact system administrator.' },
+        { status: 500 }
+      );
+    }
+    
+    if (error.message.includes('Schema application failed') || error.message.includes('Failed to apply schema')) {
+      return NextResponse.json<AdminRegistrationResponse>(
+        { success: false, error: 'Failed to set up schema structure. Please contact system administrator.' },
+        { status: 500 }
+      );
     }
 
-    // Handle database connection errors
-    if (error instanceof Error) {
-      if (error.message.includes('Database connection') || 
-          error.message.includes('connect') ||
-          error.message.includes('ECONNREFUSED')) {
-        return NextResponse.json({ 
-          success: false, 
-          error: 'Database connection failed. Please try again.' 
-        }, { status: 503 });
+    if (error.code === 'P2002') {
+      const constraint = error.meta?.target;
+      if (constraint?.includes('email')) {
+        return NextResponse.json<AdminRegistrationResponse>(
+          { success: false, error: 'Admin with this email already exists' },
+          { status: 409 }
+        );
+      }
+      if (constraint?.includes('schemaName')) {
+        return NextResponse.json<AdminRegistrationResponse>(
+          { success: false, error: 'Schema name already exists. Please try again.' },
+          { status: 409 }
+        );
       }
     }
-    
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Registration failed. Please try again.' 
-    }, { status: 500 });
+
+    return NextResponse.json<AdminRegistrationResponse>(
+      { success: false, error: 'Internal server error. Please try again.' },
+      { status: 500 }
+    );
+  } finally {
+    await prisma.$disconnect();
   }
 }
 
-async function sendWelcomeEmail(
-  dbInstance: any, 
-  user: any, 
-  confirmationToken: string, 
-  requiresConfirmation: boolean, 
-  baseUrl: string,
-  registrationMethod: string
-) {
-  if (!user.email?.trim()) return;
-
-  const confirmationLink = `${baseUrl}/confirm?token=${confirmationToken}&db=${dbInstance.id}`;
-  const dashboardLink = `${baseUrl}/dashboard/db/${dbInstance.id}`;
-
-  let emailSubject = `Welcome to ${dbInstance.displayName || dbInstance.name}`;
-  let emailContent = '';
-
-  emailContent = `
-    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-      <div style="text-align: center; margin-bottom: 30px;">
-        <h1 style="color: #f59e0b; margin: 0;">🍯 Welcome to ${dbInstance.displayName || dbInstance.name}!</h1>
-      </div>
-      
-      <p style="font-size: 16px; line-height: 1.5;">Hi ${user.firstname},</p>
-      
-      <p style="font-size: 16px; line-height: 1.5;">
-        Thank you for registering with <strong>${dbInstance.displayName || dbInstance.name}</strong>!
-      </p>
-      
-      <div style="background: linear-gradient(135deg, #fef3c7 0%, #fcd34d 100%); padding: 20px; border-radius: 12px; margin: 25px 0; border-left: 4px solid #f59e0b;">
-        <h3 style="color: #92400e; margin: 0 0 15px 0; font-size: 18px;">👤 Account Details</h3>
-        <p style="margin: 8px 0; color: #451a03;"><strong>Name:</strong> ${user.firstname} ${user.lastname}</p>
-        <p style="margin: 8px 0; color: #451a03;"><strong>Role:</strong> ${user.role}</p>
-        <p style="margin: 8px 0; color: #451a03;"><strong>Database:</strong> ${dbInstance.displayName || dbInstance.name}</p>
-      </div>
-      
-      ${requiresConfirmation ? `
-        <div style="background-color: #dbeafe; padding: 20px; border-radius: 12px; margin: 25px 0; text-align: center; border-left: 4px solid #3b82f6;">
-          <h3 style="color: #1e40af; margin: 0 0 15px 0; font-size: 18px;">📧 Email Confirmation Required</h3>
-          <p style="color: #1e40af; margin: 0 0 20px 0;">Please confirm your email address to activate your account:</p>
-          <a href="${confirmationLink}" 
-             style="display: inline-block; background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); margin-bottom: 15px;">
-            ✅ Confirm Email Address
-          </a>
-        </div>
-      ` : `
-        <div style="background-color: #dbeafe; padding: 20px; border-radius: 12px; margin: 25px 0; text-align: center;">
-          <p style="color: #1e40af; margin: 0 0 20px 0; font-size: 16px;">
-            🎉 Your account is ready to use!
-          </p>
-        </div>
-      `}
-      
-      <div style="text-align: center; margin: 30px 0;">
-        <a href="${dashboardLink}" 
-           style="display: inline-block; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-          🚀 Go to Dashboard
-        </a>
-      </div>
-      
-      <div style="border-top: 1px solid #e5e7eb; padding-top: 20px; margin-top: 30px;">
-        <p style="color: #6b7280; font-size: 14px; line-height: 1.5; margin: 0;">
-          If you have any questions, please contact our support team.
-        </p>
-      </div>
-    </div>
-  `;
-
-  const mailOptions = {
-    from: process.env.EMAIL_USER,
-    to: user.email,
-    subject: emailSubject,
-    html: emailContent,
-  };
-
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Welcome email sent to ${user.email} for database ${dbInstance.displayName || dbInstance.name}`);
-  } catch (error) {
-    console.error(`Failed to send welcome email to ${user.email}:`, error);
-  }
+export async function GET(): Promise<NextResponse<AdminRegistrationResponse>> {
+  return NextResponse.json(
+    { success: false, error: 'Method not allowed' },
+    { status: 405 }
+  );
 }
+
+export async function PUT(): Promise<NextResponse<AdminRegistrationResponse>> {
+  return NextResponse.json(
+    { success: false, error: 'Method not allowed' },
+    { status: 405 }
+  );
+}
+
+export async function DELETE(): Promise<NextResponse<AdminRegistrationResponse>> {
+  return NextResponse.json(
+    { success: false, error: 'Method not allowed' },
+    { status: 405 }
+  );
+}
+
+export type { AdminRegistrationRequest, AdminRegistrationResponse };

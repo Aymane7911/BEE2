@@ -19,19 +19,23 @@ import {
   Shield
 } from 'lucide-react';
 
-// Original interfaces from your code
+// Updated interfaces to match your new schema-per-tenant system
 interface AdminData {
   id: number;
   firstname: string;
   lastname: string;
   email: string;
   role: string;
+  schemaName: string; // Added schemaName
+  displayName: string; // Added displayName
 }
 
-interface DatabaseData {
-  id: string;
+interface SchemaData {
   name: string;
   displayName: string;
+  description?: string;
+  maxUsers: number;
+  maxStorage: number;
 }
 
 interface Stats {
@@ -92,7 +96,7 @@ interface DashboardData {
   error?: string;
   data?: {
     admin: AdminData;
-    database: DatabaseData;
+    schema: SchemaData; // Changed from 'database' to 'schema'
     adminUser?: AdminUser;
     stats: Stats;
     recentActivity: {
@@ -218,11 +222,20 @@ export default function AdminDashboard() {
       const data: DashboardData = await response.json();
       
       if (!data.success) {
+        // Handle specific error types
+        if (data.error?.includes('Authentication required') || 
+            data.error?.includes('Invalid authentication token') ||
+            data.error?.includes('outdated authentication format')) {
+          // Redirect to login for authentication errors
+          window.location.href = '/admin/login';
+          return;
+        }
         throw new Error(data.error || 'Failed to fetch dashboard data');
       }
       
       setDashboardData(data);
     } catch (err) {
+      console.error('Dashboard fetch error:', err);
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoading(false);
@@ -277,6 +290,20 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleLogout = async () => {
+    try {
+      // Clear admin token cookie by calling logout endpoint
+      await fetch('/api/admin/logout', { method: 'POST' });
+      
+      // Redirect to login page
+      window.location.href = '/admin/login';
+    } catch (error) {
+      console.error('Logout error:', error);
+      // Force redirect even if logout API fails
+      window.location.href = '/admin/login';
+    }
+  };
+
   useEffect(() => {
     fetchDashboardData();
   }, []);
@@ -291,7 +318,7 @@ export default function AdminDashboard() {
           </div>
           <div>
             <h2 className="text-xl font-bold text-gray-900">Loading Dashboard</h2>
-            <p className="text-gray-600">Gathering your data...</p>
+            <p className="text-gray-600">Gathering your workspace data...</p>
           </div>
         </div>
       </div>
@@ -309,13 +336,22 @@ export default function AdminDashboard() {
             <h2 className="text-xl font-bold">Error Loading Dashboard</h2>
           </div>
           <p className="text-gray-600 mb-6">{error}</p>
-          <button
-            onClick={fetchDashboardData}
-            className="w-full bg-gradient-to-r from-red-500 to-pink-600 text-white py-3 px-6 rounded-xl hover:from-red-600 hover:to-pink-700 transition-all duration-300 flex items-center justify-center space-x-2 shadow-lg hover:shadow-xl"
-          >
-            <RefreshCw className="w-5 h-5" />
-            <span>Retry</span>
-          </button>
+          <div className="space-y-3">
+            <button
+              onClick={fetchDashboardData}
+              className="w-full bg-gradient-to-r from-red-500 to-pink-600 text-white py-3 px-6 rounded-xl hover:from-red-600 hover:to-pink-700 transition-all duration-300 flex items-center justify-center space-x-2 shadow-lg hover:shadow-xl"
+            >
+              <RefreshCw className="w-5 h-5" />
+              <span>Retry</span>
+            </button>
+            <button
+              onClick={handleLogout}
+              className="w-full bg-gradient-to-r from-gray-500 to-gray-600 text-white py-3 px-6 rounded-xl hover:from-gray-600 hover:to-gray-700 transition-all duration-300 flex items-center justify-center space-x-2 shadow-lg hover:shadow-xl"
+            >
+              <LogIn className="w-5 h-5" />
+              <span>Back to Login</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -333,7 +369,7 @@ export default function AdminDashboard() {
     );
   }
 
-  const { admin, database, adminUser, stats, recentActivity } = dashboardData.data;
+  const { admin, schema, adminUser, stats, recentActivity } = dashboardData.data;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50">
@@ -369,9 +405,22 @@ export default function AdminDashboard() {
             </div>
             
             <div className="flex items-center space-x-6">
+              {/* Schema Info Card */}
               <div className="text-right bg-white/50 backdrop-blur-sm rounded-xl p-4 border border-white/20">
-                <p className="text-sm font-bold text-gray-900">{database.displayName}</p>
+                <p className="text-sm font-bold text-gray-900">{schema.displayName}</p>
                 <p className="text-xs text-blue-600 font-medium">{admin.role}</p>
+                <p className="text-xs text-gray-500 mt-1">
+                  Schema: {schema.name}
+                </p>
+                {schema.description && (
+                  <p className="text-xs text-gray-400 mt-1 max-w-48 truncate">
+                    {schema.description}
+                  </p>
+                )}
+                <div className="flex items-center justify-between mt-2 text-xs text-gray-500">
+                  <span>Max Users: {schema.maxUsers}</span>
+                  <span>Storage: {schema.maxStorage}GB</span>
+                </div>
               </div>
               
               {/* Action Buttons */}
@@ -402,6 +451,15 @@ export default function AdminDashboard() {
                     <span className="font-medium">Go to App</span>
                   </button>
                 )}
+
+                {/* Logout Button */}
+                <button
+                  onClick={handleLogout}
+                  className="bg-gradient-to-r from-gray-500 to-gray-600 text-white py-3 px-4 rounded-xl hover:from-gray-600 hover:to-gray-700 transition-all duration-300 flex items-center justify-center shadow-lg hover:shadow-xl transform hover:-translate-y-1"
+                  title="Logout"
+                >
+                  <LogIn className="w-5 h-5 rotate-180" />
+                </button>
               </div>
             </div>
           </div>
@@ -612,14 +670,8 @@ export default function AdminDashboard() {
           background: #f1f5f9;
           border-radius: 10px;
         }
-        
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: linear-gradient(to bottom, #3b82f6, #8b5cf6);
-          border-radius: 10px;
-        }
-        
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: linear-gradient(to bottom, #2563eb, #7c3aed);
+          background: linear-gradient(45deg, #2563eb, #7c3aed);
         }
       `}</style>
     </div>

@@ -1,4 +1,4 @@
-// /lib/auth.ts - Updated with databaseId support and fixed TypeScript errors
+// /lib/auth.ts - Updated for Schema-per-Tenant architecture
 import { NextAuthOptions } from "next-auth";
 import GoogleProvider from "next-auth/providers/google";
 import LinkedInProvider from "next-auth/providers/linkedin";
@@ -7,9 +7,9 @@ import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import jwt from 'jsonwebtoken';
 import { NextRequest } from 'next/server';
-import { masterDb } from '@/lib/database-connection'; 
+import { publicDb, getSchemaConnection } from '@/lib/database-connection';
 
-// Extend NextAuth types
+// Extend NextAuth types for schema-per-tenant
 declare module "next-auth" {
   interface User {
     id: string;
@@ -17,7 +17,8 @@ declare module "next-auth" {
     lastName: string;
     companyId: string;
     role: string;
-    databaseId: string;
+    schemaName: string; // Changed from databaseId to schemaName
+    databaseId: string; // Keep for compatibility, but will be same as schemaName
   }
 
   interface Session {
@@ -30,14 +31,14 @@ declare module "next-auth" {
       lastName: string;
       companyId: string;
       role: string;
-      databaseId: string;
+      schemaName: string; // Changed from databaseId to schemaName
+      databaseId: string; // Keep for compatibility
     };
   }
 }
 
-
-
-const prisma = new PrismaClient();
+// Use publicDb for NextAuth adapter (public schema for auth management)
+const prisma = publicDb;
 
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma) as any,
@@ -55,7 +56,8 @@ export const authOptions: NextAuthOptions = {
           lastName: profile.family_name || "",
           companyId: "", // Changed from null to empty string
           role: "USER", // Keep as string
-          databaseId: "" // Changed from null to empty string
+          schemaName: "", // Changed from databaseId to schemaName
+          databaseId: "" // Keep for compatibility
         };
       },
     }),
@@ -72,7 +74,8 @@ export const authOptions: NextAuthOptions = {
           lastName: profile.localizedLastName || "",
           companyId: "", // Added missing property
           role: "USER", // Added missing property
-          databaseId: "" // Added missing property
+          schemaName: "", // Changed from databaseId to schemaName
+          databaseId: "" // Keep for compatibility
         };
       },
     }),
@@ -82,31 +85,63 @@ export const authOptions: NextAuthOptions = {
     async signIn({ user, account, profile }) {
       if (account?.provider === "google" || account?.provider === "linkedin") {
         try {
-          const existingUser = await prisma.beeusers.findFirst({
-            where: { email: user.email! },
-            include: { database: true }
+          // For schema-per-tenant, we need to find which schema the user belongs to
+          // First, check if user exists in any active schema
+          
+          const activeAdmins = await publicDb.admin.findMany({
+            where: { isActive: true },
+            select: {
+              id: true,
+              schemaName: true,
+              email: true,
+            }
           });
 
+          let userSchema: string | null = null;
+          let existingUser: any = null;
+
+          // Check each active schema for the user
+          for (const admin of activeAdmins) {
+            try {
+              const schemaDb = await getSchemaConnection(admin.schemaName);
+              const schemaUser = await schemaDb.beeusers.findFirst({
+                where: { email: user.email! }
+              });
+
+              if (schemaUser) {
+                existingUser = schemaUser;
+                userSchema = admin.schemaName;
+                break;
+              }
+            } catch (error) {
+              console.warn(`Failed to check schema ${admin.schemaName} for user:`, error);
+              continue;
+            }
+          }
+
           if (!existingUser) {
-            // For new users, you need to determine which database they belong to
-            // This could be based on domain, invitation, or a default database
+            // For new users, you need to determine which schema they belong to
+            // This could be based on domain, invitation, or a default schema
             
-            // Example: Get default database or create one
-            let defaultDatabase = await prisma.database.findFirst({
-              where: { isActive: true },
+            // Example: Get default admin/schema or create one
+            let defaultAdmin = await publicDb.admin.findFirst({
+              where: { 
+                isActive: true,
+                role: 'super_admin' // Or whatever your default logic is
+              },
               orderBy: { createdAt: 'asc' }
             });
 
-            if (!defaultDatabase) {
-              // Create a default database if none exists
-              // You might want to handle this differently based on your business logic
-              throw new Error('No active database found. Please contact administrator.');
+            if (!defaultAdmin) {
+              throw new Error('No active admin schema found. Please contact administrator.');
             }
 
+            // Create user in the default schema
             const randomPassword = Math.random().toString(36).slice(-8);
             const hashedPassword = await bcrypt.hash(randomPassword, 12);
 
-            await prisma.beeusers.create({
+            const defaultSchemaDb = await getSchemaConnection(defaultAdmin.schemaName);
+            await defaultSchemaDb.beeusers.create({
               data: {
                 firstname: (user as any).firstName || user.name?.split(" ")[0] || "",
                 lastname: (user as any).lastName || user.name?.split(" ").slice(1).join(" ") || "",
@@ -114,10 +149,15 @@ export const authOptions: NextAuthOptions = {
                 password: hashedPassword,
                 isConfirmed: true,
                 isProfileComplete: false,
-                databaseId: defaultDatabase.id, // Assign to database
+                role: 'user', // Default role in schema
+                isAdmin: false,
+                adminId: null, // Not linked to admin
               },
             });
+
+            userSchema = defaultAdmin.schemaName;
           }
+
           return true;
         } catch (error) {
           console.error("Error during OAuth sign in:", error);
@@ -129,26 +169,58 @@ export const authOptions: NextAuthOptions = {
     
     async jwt({ token, user, account }) {
       if (user?.email) {
-        // Get user from database with database info
-        const dbUser = await prisma.beeusers.findFirst({
-          where: { email: user.email },
-          select: { 
-            id: true, 
-            email: true, 
-            firstname: true, 
-            lastname: true,
-            databaseId: true 
+        // Find which schema the user belongs to
+        const activeAdmins = await publicDb.admin.findMany({
+          where: { isActive: true },
+          select: {
+            id: true,
+            schemaName: true,
+            email: true,
           }
         });
 
-        if (dbUser) {
+        let userSchema: string | null = null;
+        let dbUser: any = null;
+
+        // Check each active schema for the user
+        for (const admin of activeAdmins) {
+          try {
+            const schemaDb = await getSchemaConnection(admin.schemaName);
+            const schemaUser = await schemaDb.beeusers.findFirst({
+              where: { email: user.email },
+              select: { 
+                id: true, 
+                email: true, 
+                firstname: true, 
+                lastname: true,
+                role: true,
+                isAdmin: true,
+                adminId: true
+              }
+            });
+
+            if (schemaUser) {
+              dbUser = schemaUser;
+              userSchema = admin.schemaName;
+              break;
+            }
+          } catch (error) {
+            console.warn(`Failed to check schema ${admin.schemaName} for user:`, error);
+            continue;
+          }
+        }
+
+        if (dbUser && userSchema) {
           token.userId = dbUser.id;
           token.email = dbUser.email;
           token.firstName = dbUser.firstname;
           token.lastName = dbUser.lastname;
-          token.databaseId = dbUser.databaseId;
+          token.schemaName = userSchema; // Changed from databaseId to schemaName
+          token.databaseId = userSchema; // Keep for compatibility
           token.companyId = ""; // Set default value
-          token.role = "USER"; // Set default value
+          token.role = dbUser.role || "USER"; // Use role from schema
+          token.isAdmin = dbUser.isAdmin || false;
+          token.adminId = dbUser.adminId;
         }
       }
       return token;
@@ -165,7 +237,8 @@ export const authOptions: NextAuthOptions = {
           lastName: token.lastName as string,
           companyId: token.companyId as string,
           role: token.role as string,
-          databaseId: token.databaseId as string,
+          schemaName: token.schemaName as string, // Changed from databaseId to schemaName
+          databaseId: token.databaseId as string, // Keep for compatibility
         };
       }
       return session;
@@ -181,9 +254,9 @@ export const authOptions: NextAuthOptions = {
 };
 
 /**
- * Creates a JWT token for API authentication
+ * Creates a JWT token for API authentication (schema-per-tenant)
  */
-export function createJWTToken(userId: number, email: string, databaseId: string): string {
+export function createJWTToken(userId: number, email: string, schemaName: string): string {
   const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET;
   if (!secret) {
     throw new Error('JWT_SECRET or NEXTAUTH_SECRET environment variable is required');
@@ -192,7 +265,7 @@ export function createJWTToken(userId: number, email: string, databaseId: string
   const payload = {
     userId,
     email,
-    databaseId, // Include databaseId in JWT
+    schemaName, // Changed from databaseId to schemaName
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
   };
@@ -201,9 +274,30 @@ export function createJWTToken(userId: number, email: string, databaseId: string
 }
 
 /**
- * Enhanced JWT verification that checks if user still exists in database
+ * Creates a JWT token for admin authentication
  */
-export async function getUserFromToken(token: string): Promise<{ userId: string; databaseId: string } | null> {
+export function createAdminJWTToken(adminId: number, email: string, role: string, schemaName: string): string {
+  const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET;
+  if (!secret) {
+    throw new Error('JWT_SECRET or NEXTAUTH_SECRET environment variable is required');
+  }
+
+  const payload = {
+    adminId,
+    email,
+    role,
+    schemaName,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
+  };
+
+  return jwt.sign(payload, secret);
+}
+
+/**
+ * Enhanced JWT verification for schema-per-tenant
+ */
+export async function getUserFromToken(token: string): Promise<{ userId: string; schemaName: string } | null> {
   try {
     if (!token) {
       console.log('[getUserFromToken] No token provided');
@@ -236,107 +330,65 @@ export async function getUserFromToken(token: string): Promise<{ userId: string;
     console.log('[getUserFromToken] Decoded JWT payload:', {
       userId: decoded.userId,
       email: decoded.email,
-      databaseId: decoded.databaseId,
+      schemaName: decoded.schemaName,
       iat: decoded.iat,
       exp: decoded.exp
     });
 
     let userId: string | null = null;
-    let databaseId: string | null = decoded.databaseId || null;
+    let schemaName: string | null = decoded.schemaName || null;
 
     if (decoded.userId) {
       userId = decoded.userId.toString();
-    } else if (decoded.email && decoded.databaseId) {
-      // ✅ FIX: Search in the TENANT database, not master database
-      console.log('[getUserFromToken] userId undefined, searching by email in tenant database:', decoded.databaseId);
+    } else if (decoded.email && decoded.schemaName) {
+      // Search for user by email in the specific schema
+      console.log('[getUserFromToken] userId undefined, searching by email in schema:', decoded.schemaName);
       
-      // Get the tenant database URL from master database
-      const database = await masterDb.database.findUnique({
-        where: { id: decoded.databaseId },
-        select: { databaseUrl: true, isActive: true }
-      });
-
-      if (!database || !database.isActive) {
-        console.error('[getUserFromToken] Database not found or inactive:', decoded.databaseId);
-        return null;
-      }
-
-      // Connect to the tenant database
-      const tenantDb = new PrismaClient({
-        datasources: {
-          db: {
-            url: database.databaseUrl,
-          },
-        },
-      });
-
       try {
-        await tenantDb.$connect();
-        
-        // Search for user in the TENANT database
-        const dbUser = await tenantDb.beeusers.findFirst({
+        const schemaDb = await getSchemaConnection(decoded.schemaName);
+        const dbUser = await schemaDb.beeusers.findFirst({
           where: { email: decoded.email },
-          select: { id: true, databaseId: true }
+          select: { id: true }
         });
         
         if (dbUser) {
           userId = dbUser.id.toString();
-          databaseId = dbUser.databaseId;
-          console.log('[getUserFromToken] Found user in tenant database:', { userId, databaseId });
+          console.log('[getUserFromToken] Found user in schema:', { userId, schemaName });
         } else {
-          console.warn('[getUserFromToken] User not found in tenant database with email:', decoded.email);
+          console.warn('[getUserFromToken] User not found in schema with email:', decoded.email);
         }
-      } finally {
-        await tenantDb.$disconnect();
+      } catch (error) {
+        console.error('[getUserFromToken] Error searching user in schema:', error);
+        return null;
       }
     }
 
-    if (!userId || !databaseId) {
-      console.warn('[getUserFromToken] Missing userId or databaseId after lookup');
+    if (!userId || !schemaName) {
+      console.warn('[getUserFromToken] Missing userId or schemaName after lookup');
       return null;
     }
 
-    // ✅ FIX: Verify user exists in the TENANT database, not master
-    console.log('[getUserFromToken] Verifying user exists in tenant database...');
+    // Verify user still exists in the schema
+    console.log('[getUserFromToken] Verifying user exists in schema...');
     
-    // Get the tenant database URL again
-    const database = await masterDb.database.findUnique({
-      where: { id: databaseId },
-      select: { databaseUrl: true, isActive: true }
-    });
-
-    if (!database || !database.isActive) {
-      console.error('[getUserFromToken] Database not found or inactive during verification:', databaseId);
-      return null;
-    }
-
-    // Connect to tenant database for verification
-    const tenantDb = new PrismaClient({
-      datasources: {
-        db: {
-          url: database.databaseUrl,
-        },
-      },
-    });
-
     try {
-      await tenantDb.$connect();
-      
-      const userExists = await tenantDb.beeusers.findUnique({
+      const schemaDb = await getSchemaConnection(schemaName);
+      const userExists = await schemaDb.beeusers.findUnique({
         where: { id: parseInt(userId) },
-        select: { id: true, databaseId: true }
+        select: { id: true, isConfirmed: true, role: true }
       });
 
       if (!userExists) {
-        console.warn('[getUserFromToken] User no longer exists in tenant database:', userId);
+        console.warn('[getUserFromToken] User no longer exists in schema:', userId);
         return null;
       }
 
-      console.log('[getUserFromToken] User verified and exists in tenant database:', { userId, databaseId });
-      return { userId, databaseId };
+      console.log('[getUserFromToken] User verified and exists in schema:', { userId, schemaName });
+      return { userId, schemaName };
       
-    } finally {
-      await tenantDb.$disconnect();
+    } catch (error) {
+      console.error('[getUserFromToken] Error verifying user in schema:', error);
+      return null;
     }
 
   } catch (error: any) {
@@ -353,9 +405,90 @@ export async function getUserFromToken(token: string): Promise<{ userId: string;
 }
 
 /**
- * Simplified authentication for API routes - JWT ONLY
+ * Get admin from JWT token (for admin authentication)
  */
-export async function authenticateRequest(request: NextRequest): Promise<{ userId: string; databaseId: string } | null> {
+export async function getAdminFromToken(token: string): Promise<{ adminId: string; schemaName: string; role: string } | null> {
+  try {
+    if (!token) {
+      console.log('[getAdminFromToken] No token provided');
+      return null;
+    }
+
+    const cleanToken = token.replace(/^Bearer\s+/i, '').trim();
+    
+    if (!cleanToken) {
+      console.log('[getAdminFromToken] Empty token after cleaning');
+      return null;
+    }
+
+    const tokenParts = cleanToken.split('.');
+    if (tokenParts.length !== 3) {
+      console.error('[getAdminFromToken] Invalid JWT format');
+      return null;
+    }
+
+    const secret = process.env.JWT_SECRET || process.env.NEXTAUTH_SECRET;
+    if (!secret) {
+      console.error('[getAdminFromToken] No JWT secret found');
+      return null;
+    }
+
+    const decoded = jwt.verify(cleanToken, secret) as any;
+    console.log('[getAdminFromToken] Decoded admin JWT:', {
+      adminId: decoded.adminId,
+      email: decoded.email,
+      role: decoded.role,
+      schemaName: decoded.schemaName
+    });
+
+    if (!decoded.adminId || !decoded.schemaName || !decoded.role) {
+      console.warn('[getAdminFromToken] Missing required admin token fields');
+      return null;
+    }
+
+    // Verify admin exists in public database
+    const admin = await publicDb.admin.findUnique({
+      where: { id: decoded.adminId },
+      select: { 
+        id: true, 
+        schemaName: true, 
+        role: true, 
+        isActive: true 
+      }
+    });
+
+    if (!admin || !admin.isActive) {
+      console.warn('[getAdminFromToken] Admin not found or inactive:', decoded.adminId);
+      return null;
+    }
+
+    if (admin.schemaName !== decoded.schemaName) {
+      console.warn('[getAdminFromToken] Schema name mismatch');
+      return null;
+    }
+
+    return {
+      adminId: decoded.adminId.toString(),
+      schemaName: decoded.schemaName,
+      role: decoded.role
+    };
+
+  } catch (error: any) {
+    if (error.name === 'TokenExpiredError') {
+      console.log('[getAdminFromToken] Admin JWT token expired');
+    } else if (error.name === 'JsonWebTokenError') {
+      console.log('[getAdminFromToken] Invalid admin JWT token');
+    } else {
+      console.error('[getAdminFromToken] Admin JWT verification error:', error.message);
+    }
+    return null;
+  }
+}
+
+/**
+ * Simplified authentication for API routes - JWT ONLY (schema-per-tenant)
+ */
+export async function authenticateRequest(request: NextRequest): Promise<{ userId: string; schemaName: string } | null> {
   try {
     // Only check Authorization header for JWT token
     const authHeader = request.headers.get('authorization');
@@ -388,25 +521,140 @@ export async function authenticateRequest(request: NextRequest): Promise<{ userI
 }
 
 /**
- * Get current user from JWT token
+ * Admin authentication for API routes
+ */
+export async function authenticateAdminRequest(request: NextRequest): Promise<{ adminId: string; schemaName: string; role: string } | null> {
+  try {
+    // Check cookies first (for web requests)
+    const cookies = request.cookies;
+    const adminTokenNames = ['admin-token', 'admin_token', 'adminToken'];
+    let adminToken: string | undefined;
+    
+    for (const tokenName of adminTokenNames) {
+      const token = cookies.get(tokenName)?.value;
+      if (token) {
+        adminToken = token;
+        break;
+      }
+    }
+    
+    // Check Authorization header if no cookie found
+    if (!adminToken) {
+      const authHeader = request.headers.get('authorization');
+      if (authHeader?.startsWith('Bearer ')) {
+        adminToken = authHeader.substring(7);
+      }
+    }
+
+    if (!adminToken) {
+      console.log('[authenticateAdminRequest] No admin token found');
+      return null;
+    }
+
+    const adminInfo = await getAdminFromToken(adminToken);
+
+    if (adminInfo) {
+      console.log('[authenticateAdminRequest] Authenticated admin:', adminInfo);
+      return adminInfo;
+    } else {
+      console.log('[authenticateAdminRequest] Admin token validation failed');
+      return null;
+    }
+
+  } catch (error) {
+    console.error('[authenticateAdminRequest] Admin authentication error:', error);
+    return null;
+  }
+}
+
+/**
+ * Get current user from JWT token (schema-per-tenant)
  */
 export async function getCurrentUser(request: NextRequest) {
   try {
     const userInfo = await authenticateRequest(request);
     if (!userInfo) return null;
 
-    const dbUser = await prisma.beeusers.findUnique({
+    // Get user from their specific schema
+    const schemaDb = await getSchemaConnection(userInfo.schemaName);
+    const dbUser = await schemaDb.beeusers.findUnique({
       where: { id: parseInt(userInfo.userId) },
       include: {
         tokenStats: true,
         batches: true,
-        database: true, // Include database info
       },
     });
 
     return dbUser;
   } catch (error) {
     console.error('[getCurrentUser] Error:', error);
+    return null;
+  }
+}
+
+/**
+ * Get current admin from JWT token
+ */
+export async function getCurrentAdmin(request: NextRequest) {
+  try {
+    const adminInfo = await authenticateAdminRequest(request);
+    if (!adminInfo) return null;
+
+    // Get admin from public database
+    const admin = await publicDb.admin.findUnique({
+      where: { id: parseInt(adminInfo.adminId) },
+      select: {
+        id: true,
+        firstname: true,
+        lastname: true,
+        email: true,
+        role: true,
+        schemaName: true,
+        displayName: true,
+        isActive: true,
+        createdAt: true,
+      }
+    });
+
+    return admin;
+  } catch (error) {
+    console.error('[getCurrentAdmin] Error:', error);
+    return null;
+  }
+}
+
+/**
+ * Find user's schema by email (utility function)
+ */
+export async function findUserSchema(email: string): Promise<string | null> {
+  try {
+    const activeAdmins = await publicDb.admin.findMany({
+      where: { isActive: true },
+      select: {
+        schemaName: true,
+      }
+    });
+
+    for (const admin of activeAdmins) {
+      try {
+        const schemaDb = await getSchemaConnection(admin.schemaName);
+        const user = await schemaDb.beeusers.findFirst({
+          where: { email: email },
+          select: { id: true }
+        });
+
+        if (user) {
+          return admin.schemaName;
+        }
+      } catch (error) {
+        console.warn(`Failed to check schema ${admin.schemaName} for user ${email}:`, error);
+        continue;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error finding user schema:', error);
     return null;
   }
 }
@@ -419,13 +667,16 @@ export function clearClientSession() {
     localStorage.removeItem('user');
     localStorage.removeItem('next-auth.session-token');
     localStorage.removeItem('next-auth.csrf-token');
+    localStorage.removeItem('admin-token');
+    localStorage.removeItem('admin_token');
+    localStorage.removeItem('adminToken');
     
     sessionStorage.removeItem('token');
     sessionStorage.removeItem('accessToken');
     sessionStorage.removeItem('user');
     
     Object.keys(localStorage).forEach(key => {
-      if (key.startsWith('next-auth') || key.startsWith('auth')) {
+      if (key.startsWith('next-auth') || key.startsWith('auth') || key.startsWith('admin')) {
         localStorage.removeItem(key);
       }
     });

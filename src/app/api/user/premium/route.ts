@@ -1,181 +1,283 @@
-// app/api/user/premium/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { PrismaClient } from '@prisma/client';
-import jwt, { JwtPayload } from 'jsonwebtoken';
+import { authenticateRequest } from "@/lib/auth";
 
-const prisma = new PrismaClient();
-
-// Define interface for your JWT payload
-interface CustomJwtPayload extends JwtPayload {
-  email: string;
-}
-
-// Function to verify JWT token
-function verifyToken(token: string): CustomJwtPayload | null {
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-    
-    // Type guard to ensure we have a proper JWT payload with email
-    if (typeof decoded === 'object' && decoded !== null && 'email' in decoded) {
-      return decoded as CustomJwtPayload;
-    }
-    
-    return null;
-  } catch (error) {
-    console.error('Token verification failed:', error);
-    return null;
-  }
-}
-
-// Function to extract token from request
-function getTokenFromRequest(request: NextRequest): string | null {
-  // Check Authorization header first
-  const authHeader = request.headers.get('authorization');
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.substring(7);
-  }
-  
-  // Check cookies as fallback
-  const cookies = request.headers.get('cookie');
-  if (cookies) {
-    const tokenMatch = cookies.match(/token=([^;]+)/);
-    if (tokenMatch) {
-      return tokenMatch[1];
-    }
-  }
-  
-  return null;
-}
-
+// PATCH - Update user premium status (requires authentication)
 export async function PATCH(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] PATCH /api/user/premium - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
   try {
-    console.log('=== PATCH /api/user/premium ===');
-    console.log('Request headers:', Object.fromEntries(request.headers.entries()));
+    console.log(`🔐 [${requestId}] Authenticating request...`);
     
-    // Get token from request
-    const token = getTokenFromRequest(request);
-    console.log('Token found:', !!token);
-    
-    if (!token) {
-      console.log('❌ No token found, returning 401');
-      return NextResponse.json({ error: 'No authentication token provided' }, { status: 401 });
+    const authResult = await authenticateRequest(request);
+        
+    if (!authResult) {
+      console.log(`❌ [${requestId}] Authentication failed`);
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
     }
 
-    // Verify token
-    const decoded = verifyToken(token);
-    console.log('Token decoded:', decoded);
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
     
-    if (!decoded) {
-      console.log('❌ Invalid token, returning 401');
-      return NextResponse.json({ error: 'Invalid authentication token' }, { status: 401 });
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
+
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
     }
+
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
+      return NextResponse.json(
+        { error: "Invalid user ID" },
+        { status: 400 }
+      );
+    }
+
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
+
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
 
     const body = await request.json();
-    console.log('Request body:', body);
     const { isPremium } = body;
 
+    console.log(`📥 [${requestId}] Request body:`, { isPremium });
+
     if (typeof isPremium !== 'boolean') {
-      console.log('❌ Invalid isPremium value:', isPremium);
-      return NextResponse.json({ error: 'Invalid premium status' }, { status: 400 });
+      console.log(`❌ [${requestId}] Invalid isPremium value:`, isPremium);
+      return NextResponse.json({ 
+        error: 'Invalid premium status. Must be true or false.' 
+      }, { status: 400 });
     }
 
-    console.log('🔄 Updating user premium status for:', decoded.email);
-    console.log('Setting isPremium to:', isPremium);
-
-    // First, find the user by email to get their ID
-    const existingUser = await prisma.beeusers.findFirst({
-      where: { email: decoded.email },
-      select: { id: true }
+    // Verify user exists first
+    const existingUser = await prisma.beeusers.findUnique({
+      where: { id: userIdInt },
+      select: { 
+        id: true, 
+        email: true,
+        isPremium: true,
+        premiumStartedAt: true,
+        premiumExpiresAt: true
+      }
     });
 
     if (!existingUser) {
-      console.log('❌ User not found in database');
-      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+      console.error(`[${requestId}] ▶ User not found:`, userIdInt);
+      return NextResponse.json(
+        { error: 'User not found' },
+        { status: 404 }
+      );
     }
 
-    // Update user premium status in database using the ID
+    console.log(`🔄 [${requestId}] Updating premium status for:`, existingUser.email);
+    console.log(`[${requestId}] ▶ Current isPremium:`, existingUser.isPremium, '→ New:', isPremium);
+
+    // Calculate premium dates
+    const premiumStartedAt = isPremium ? (existingUser.premiumStartedAt || new Date()) : null;
+    const premiumExpiresAt = isPremium ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) : null; // 1 year from now
+
+    // Update user premium status
     const updatedUser = await prisma.beeusers.update({
-      where: { id: existingUser.id },
+      where: { id: userIdInt },
       data: { 
         isPremium: isPremium,
-        premiumStartedAt: isPremium ? new Date() : null,
-        premiumExpiresAt: isPremium ? new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) : null // 1 year from now
+        premiumStartedAt: premiumStartedAt,
+        premiumExpiresAt: premiumExpiresAt
       },
       select: {
         id: true,
         email: true,
+        firstname: true,
+        lastname: true,
         isPremium: true,
+        isAdmin: true,
         premiumStartedAt: true,
         premiumExpiresAt: true
       }
     });
 
-    console.log('✅ User updated successfully:', updatedUser);
+    console.log(`✅ [${requestId}] Successfully updated premium status for:`, updatedUser.email);
 
     return NextResponse.json({
       success: true,
+      message: `Premium status ${isPremium ? 'activated' : 'deactivated'} successfully`,
       user: updatedUser
     });
-   
-  } catch (error) {
-    console.error('❌ Error updating premium status:', error);
-    console.error('Error stack:', (error as Error).stack);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
+    
+    // Handle Prisma specific errors
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
+      return NextResponse.json(
+        {
+          error: 'Unique constraint violation',
+          details: 'Database constraint error',
+        },
+        { status: 409 }
+      );
+    }
+
+    return NextResponse.json({ 
+      error: 'Failed to update premium status',
+      details: error.message 
+    }, { status: 500 });
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] PATCH request completed`);
   }
 }
 
+// GET - Get user premium status (requires authentication)
 export async function GET(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] GET /api/user/premium - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
   try {
-    console.log('=== GET /api/user/premium ===');
+    console.log(`🔐 [${requestId}] Authenticating request...`);
     
-    // Get token from request
-    const token = getTokenFromRequest(request);
-    console.log('Token found:', !!token);
-    
-    if (!token) {
-      console.log('❌ No token found, returning 401');
-      return NextResponse.json({ error: 'No authentication token provided' }, { status: 401 });
+    const authResult = await authenticateRequest(request);
+        
+    if (!authResult) {
+      console.log(`❌ [${requestId}] Authentication failed`);
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
     }
 
-    // Verify token
-    const decoded = verifyToken(token);
-    console.log('Token decoded:', decoded);
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
     
-    if (!decoded) {
-      console.log('❌ Invalid token, returning 401');
-      return NextResponse.json({ error: 'Invalid authentication token' }, { status: 401 });
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
+
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
     }
 
-    console.log('🔄 Fetching user premium status for:', decoded.email);
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
+      return NextResponse.json(
+        { error: "Invalid user ID" },
+        { status: 400 }
+      );
+    }
 
-    // Get user premium status from database
-    const user = await prisma.beeusers.findFirst({
-      where: { email: decoded.email },
-      select: {
-        id: true,
-        email: true,
-        isPremium: true,
-        premiumStartedAt: true,
-        premiumExpiresAt: true
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
       }
     });
 
-    console.log('User found in database:', user);
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
+
+    // Get user premium status
+    const user = await prisma.beeusers.findUnique({
+      where: { id: userIdInt },
+      select: {
+        id: true,
+        email: true,
+        firstname: true,
+        lastname: true,
+        isPremium: true,
+        isAdmin: true,
+        premiumStartedAt: true,
+        premiumExpiresAt: true,
+        createdAt: true
+      }
+    });
 
     if (!user) {
-      console.log('❌ User not found in database');
-      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+      console.error(`[${requestId}] ▶ User not found:`, userIdInt);
+      return NextResponse.json(
+        { error: 'User not found' },
+        { status: 404 }
+      );
     }
 
-    console.log('✅ User premium status fetched successfully');
+    console.log(`✅ [${requestId}] Successfully fetched premium status for:`, user.email);
+
+    // Check if premium has expired
+    const now = new Date();
+    const isPremiumActive = user.isPremium && 
+                           (!user.premiumExpiresAt || user.premiumExpiresAt > now);
+
+    // If premium has expired, update the database
+    if (user.isPremium && user.premiumExpiresAt && user.premiumExpiresAt <= now) {
+      console.log(`⏰ [${requestId}] Premium expired for user:`, user.email);
+      
+      const expiredUser = await prisma.beeusers.update({
+        where: { id: userIdInt },
+        data: { 
+          isPremium: false,
+          premiumExpiresAt: null
+        },
+        select: {
+          id: true,
+          email: true,
+          firstname: true,
+          lastname: true,
+          isPremium: true,
+          isAdmin: true,
+          premiumStartedAt: true,
+          premiumExpiresAt: true,
+          createdAt: true
+        }
+      });
+
+      return NextResponse.json({
+        success: true,
+        user: expiredUser,
+        message: 'Premium subscription has expired'
+      });
+    }
+
     return NextResponse.json({
       success: true,
-      user: user
+      user: {
+        ...user,
+        isPremiumActive: isPremiumActive
+      }
     });
-   
-  } catch (error) {
-    console.error('❌ Error fetching user premium status:', error);
-    console.error('Error stack:', (error as Error).stack);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
+    return NextResponse.json({ 
+      error: 'Failed to fetch premium status',
+      details: error.message 
+    }, { status: 500 });
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] GET request completed`);
   }
 }

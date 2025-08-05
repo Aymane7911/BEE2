@@ -7,7 +7,7 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Admin table for super administrators
+// Admin table for super administrators (stored in public schema)
 model Admin {
   id          Int      @id @default(autoincrement())
   firstname   String   @map("firstname")
@@ -20,47 +20,22 @@ model Admin {
   updatedAt   DateTime @updatedAt @map("updated_at")
   lastLoginAt DateTime? @map("last_login_at")
   
-  // Relations - One-to-one relationship with database
-  managedDatabase Database? // Each admin can manage only one database
-  adminSessions   AdminSession[]
+  // Schema information for this admin
+  schemaName  String   @unique @map("schema_name") // e.g., "admin_123" or "acmecorp"
+  displayName String?  @map("display_name") // Friendly name for the schema
+  description String?  @map("description")
+  
+  // Configuration limits
+  maxUsers    Int?     @default(1000) @map("max_users")
+  maxStorage  Float?   @default(10.0) @map("max_storage_gb") // in GB
+  
+  // Relations
+  adminSessions AdminSession[]
 
   @@map("admins")
 }
 
-// Database instances managed by admins
-model Database {
-  id           String   @id @default(uuid())
-  name         String   @map("name")
-  displayName  String   @map("display_name")
-  databaseUrl  String   @map("database_url") // Connection string for this database
-  description  String?  @map("description")
-  isActive     Boolean  @default(true) @map("is_active")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
-  
-  // Admin who created and manages this database - One-to-one relationship
-  managedById  Int      @unique @map("managed_by_id")
-  managedBy    Admin    @relation(fields: [managedById], references: [id])
-  
-  // Database configuration
-  maxUsers     Int?     @default(1000) @map("max_users")
-  maxStorage   Float?   @default(10.0) @map("max_storage_gb") // in GB
-  
-  // Relations to database-specific data
-  batches      Batch[]
-  tokenStats   TokenStats[]
-  apiaries     Apiary[]
-  certifications Certification[]
-  accounts     Account[]
-  sessions     Session[]
-  verificationTokens VerificationToken[]
-  beeusers     beeusers[] // Add relation to beeusers
-  
-  @@unique([name])
-  @@map("databases")
-}
-
-// Admin session management
+// Admin session management (stored in public schema)
 model AdminSession {
   id           String   @id @default(cuid())
   sessionToken String   @unique @map("session_token")
@@ -72,12 +47,16 @@ model AdminSession {
   @@map("admin_sessions")
 }
 
-// User table with required database reference
+// =============================================================================
+// TENANT-SPECIFIC MODELS (Each admin gets these tables in their own schema)
+// =============================================================================
+
+// User table (stored in tenant-specific schema)
 model beeusers {
   id                Int             @id @default(autoincrement()) @map("id")
   firstname         String          @map("firstname")
   lastname          String          @map("lastname")
-  email             String          @map("email") // Removed @unique since users can have same email in different databases
+  email             String          @unique @map("email") // Unique within schema
   phonenumber       String?         @map("phonenumber")
   password          String          @map("password")
   createdAt         DateTime        @default(now()) @map("created_at")
@@ -97,10 +76,6 @@ model beeusers {
   isAdmin           Boolean         @default(false) @map("is_admin")
   adminId           Int?            @map("admin_id") // Reference to admin table (no foreign key constraint for flexibility)
   
-  // Database association - Required field
-  databaseId        String          @map("database_id")
-  database          Database        @relation(fields: [databaseId], references: [id])
-  
   accounts          Account[]
   Apiary            Apiary[]
   batches           Batch[]
@@ -108,14 +83,12 @@ model beeusers {
   sessions          Session[]
   tokenStats        TokenStats?
 
-  // Ensure email is unique within each database
-  @@unique([email, databaseId])
   @@map("beeusers")
 }
 
 model Batch {
   id                        String   @id @default(uuid())
-  batchNumber               String   
+  batchNumber               String   @unique // Unique within schema
   createdAt                 DateTime @default(now())
   bothCertifications        Float    @default(0)
   bothCertificationsPercent Int      @default(0)
@@ -144,15 +117,10 @@ model Batch {
   honeyRemaining            Float?
   totalHoneyCollected       Float?
   
-  // Database association - Required field
-  databaseId                String   @map("database_id")
-  database                  Database @relation(fields: [databaseId], references: [id])
-  
   apiaries                  Apiary[]
   user                      beeusers @relation(fields: [userId], references: [id])
 
-  // Ensure batchNumber is unique within each database
-  @@unique([batchNumber, databaseId])
+  @@map("batches")
 }
 
 model TokenStats {
@@ -164,11 +132,9 @@ model TokenStats {
   qualityOnly        Int      @default(0)
   bothCertifications Int      @default(0)
   
-  // Database association - Required field
-  databaseId         String   @map("database_id")
-  database           Database @relation(fields: [databaseId], references: [id])
-  
   beeusers           beeusers @relation(fields: [userId], references: [id])
+
+  @@map("token_stats")
 }
 
 model Apiary {
@@ -184,17 +150,15 @@ model Apiary {
   createdAt      DateTime @default(now())
   userId         Int
   
-  // Database association - Required field
-  databaseId     String   @map("database_id")
-  database       Database @relation(fields: [databaseId], references: [id])
-  
   batch          Batch?   @relation(fields: [batchId], references: [id])
   user           beeusers @relation(fields: [userId], references: [id])
+
+  @@map("apiaries")
 }
 
 model Certification {
   id                String   @id @default(cuid())
-  verificationCode  String   @map("verification_code")
+  verificationCode  String   @unique @map("verification_code") // Unique within schema
   batchIds          String   @map("batch_ids")
   certificationDate DateTime @map("certification_date") @db.Date
   totalCertified    Decimal  @map("total_certified") @db.Decimal(10, 2)
@@ -208,17 +172,12 @@ model Certification {
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
   
-  // Database association - Required field
-  databaseId        String   @map("database_id")
-  database          Database @relation(fields: [databaseId], references: [id])
-  
   user              beeusers @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Ensure verification code is unique within each database
-  @@unique([verificationCode, databaseId])
   @@index([verificationCode])
   @@index([userId])
   @@index([expiryDate])
+  @@map("certifications")
 }
 
 model Account {
@@ -235,39 +194,28 @@ model Account {
   id_token          String?
   session_state     String?
   
-  // Database association - Required field
-  databaseId        String   @map("database_id")
-  database          Database @relation(fields: [databaseId], references: [id])
-  
   user              beeusers @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([provider, providerAccountId, databaseId])
+  @@unique([provider, providerAccountId]) // Unique within schema
+  @@map("accounts")
 }
 
 model Session {
   id           String   @id @default(cuid())
-  sessionToken String   
+  sessionToken String   @unique @map("session_token") // Unique within schema
   userId       Int
   expires      DateTime
   
-  // Database association - Required field
-  databaseId   String   @map("database_id")
-  database     Database @relation(fields: [databaseId], references: [id])
-  
   user         beeusers @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  // Ensure session token is unique within each database
-  @@unique([sessionToken, databaseId])
+  @@map("sessions")
 }
 
 model VerificationToken {
   identifier String
-  token      String   
+  token      String   @unique // Unique within schema
   expires    DateTime
-  
-  // Database association - Required field
-  databaseId String   @map("database_id")
-  database   Database @relation(fields: [databaseId], references: [id])
 
-  @@unique([identifier, token, databaseId])
+  @@unique([identifier, token])
+  @@map("verification_tokens")
 }

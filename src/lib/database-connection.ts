@@ -1,25 +1,26 @@
-// lib/database-connection.ts - Improved connection management
+// lib/database-connection.ts - Schema-per-Tenant connection management
 import { PrismaClient } from '@prisma/client';
 
 // Connection pool configuration
 const CONNECTION_CONFIG = {
-  MASTER_CONNECTION_LIMIT: 3,
-  TENANT_CONNECTION_LIMIT: 2,
+  PUBLIC_CONNECTION_LIMIT: 5,
+  SCHEMA_CONNECTION_LIMIT: 3,
   CONNECTION_TIMEOUT: 30000, // 30 seconds
   IDLE_TIMEOUT: 60000, // 1 minute
   MAX_RETRIES: 3,
   RETRY_DELAY: 1000, // 1 second
 };
 
-// Cache for database connections with metadata
-interface ConnectionInfo {
+// Cache for schema connections with metadata
+interface SchemaConnectionInfo {
   client: PrismaClient;
   lastUsed: Date;
   isConnected: boolean;
   retryCount: number;
+  schemaName: string;
 }
 
-const dbConnections = new Map<string, ConnectionInfo>();
+const schemaConnections = new Map<string, SchemaConnectionInfo>();
 
 /**
  * Add connection pool parameters to database URL
@@ -63,14 +64,14 @@ function getMasterDatabaseUrl(): string {
   return masterUrl;
 }
 
-// Master database connection with error handling
-let masterDb: PrismaClient;
+// Public schema database connection (for admin management)
+let publicDb: PrismaClient;
 
 try {
   const masterDbUrl = getMasterDatabaseUrl();
-  const optimizedMasterUrl = addConnectionPoolParams(masterDbUrl, CONNECTION_CONFIG.MASTER_CONNECTION_LIMIT);
+  const optimizedMasterUrl = addConnectionPoolParams(masterDbUrl, CONNECTION_CONFIG.PUBLIC_CONNECTION_LIMIT);
   
-  masterDb = new PrismaClient({
+  publicDb = new PrismaClient({
     datasources: {
       db: {
         url: optimizedMasterUrl,
@@ -79,9 +80,9 @@ try {
     log: ['error', 'warn'],
   });
 } catch (error) {
-  console.error('Failed to initialize master database:', error);
+  console.error('Failed to initialize public database:', error);
   // Create a dummy client that will fail gracefully
-  masterDb = new PrismaClient({
+  publicDb = new PrismaClient({
     datasources: {
       db: {
         url: 'postgresql://localhost:5432/dummy',
@@ -91,17 +92,37 @@ try {
   });
 }
 
-export { masterDb };
+export { publicDb };
 
 /**
- * Create optimized Prisma client with connection pooling
+ * Create schema-specific database URL
  */
-function createOptimizedPrismaClient(databaseUrl: string): PrismaClient {
-  if (!databaseUrl || databaseUrl.trim() === '') {
+function createSchemaUrl(baseUrl: string, schemaName: string): string {
+  if (!baseUrl || baseUrl.trim() === '') {
+    throw new Error('Base database URL cannot be empty');
+  }
+  
+  try {
+    const url = new URL(baseUrl);
+    url.searchParams.set('schema', schemaName);
+    return url.toString();
+  } catch (error) {
+    // Fallback for non-URL format
+    const separator = baseUrl.includes('?') ? '&' : '?';
+    return `${baseUrl}${separator}schema=${schemaName}`;
+  }
+}
+
+/**
+ * Create optimized Prisma client for specific schema
+ */
+function createSchemaOptimizedPrismaClient(baseUrl: string, schemaName: string): PrismaClient {
+  if (!baseUrl || baseUrl.trim() === '') {
     throw new Error('Database URL cannot be empty');
   }
   
-  const optimizedUrl = addConnectionPoolParams(databaseUrl, CONNECTION_CONFIG.TENANT_CONNECTION_LIMIT);
+  const schemaUrl = createSchemaUrl(baseUrl, schemaName);
+  const optimizedUrl = addConnectionPoolParams(schemaUrl, CONNECTION_CONFIG.SCHEMA_CONNECTION_LIMIT);
   
   return new PrismaClient({
     datasources: {
@@ -114,39 +135,36 @@ function createOptimizedPrismaClient(databaseUrl: string): PrismaClient {
 }
 
 /**
- * Clean up stale connections based on idle timeout
+ * Clean up stale schema connections based on idle timeout
  */
-async function cleanupStaleConnections(): Promise<void> {
+async function cleanupStaleSchemaConnections(): Promise<void> {
   const now = new Date();
   const staleConnections: string[] = [];
 
-  for (const [databaseId, connectionInfo] of dbConnections.entries()) {
+  for (const [schemaName, connectionInfo] of schemaConnections.entries()) {
     const idleTime = now.getTime() - connectionInfo.lastUsed.getTime();
     
     if (idleTime > CONNECTION_CONFIG.IDLE_TIMEOUT) {
-      staleConnections.push(databaseId);
+      staleConnections.push(schemaName);
     }
   }
 
   // Disconnect stale connections
-  for (const databaseId of staleConnections) {
-    await disconnectDatabase(databaseId);
-    console.log(`Cleaned up stale connection for database: ${databaseId}`);
+  for (const schemaName of staleConnections) {
+    await disconnectSchema(schemaName);
+    console.log(`Cleaned up stale connection for schema: ${schemaName}`);
   }
 }
 
 /**
- * Get a Prisma client instance for a specific database with improved error handling
+ * Get a Prisma client instance for a specific schema with improved error handling
  */
-export async function getDatabaseConnection(
-  databaseUrl: string, 
-  databaseId: string
-): Promise<PrismaClient> {
+export async function getSchemaConnection(schemaName: string): Promise<PrismaClient> {
   // Clean up stale connections periodically
-  await cleanupStaleConnections();
+  await cleanupStaleSchemaConnections();
 
   // Check if we have an existing, healthy connection
-  const existingConnection = dbConnections.get(databaseId);
+  const existingConnection = schemaConnections.get(schemaName);
   if (existingConnection?.isConnected) {
     existingConnection.lastUsed = new Date();
     return existingConnection.client;
@@ -154,8 +172,11 @@ export async function getDatabaseConnection(
 
   // Remove unhealthy connection if it exists
   if (existingConnection && !existingConnection.isConnected) {
-    await disconnectDatabase(databaseId);
+    await disconnectSchema(schemaName);
   }
+
+  // Get base URL
+  const baseUrl = getMasterDatabaseUrl();
 
   // Create new connection with retry logic
   let retryCount = 0;
@@ -163,7 +184,7 @@ export async function getDatabaseConnection(
 
   while (retryCount < CONNECTION_CONFIG.MAX_RETRIES) {
     try {
-      const client = createOptimizedPrismaClient(databaseUrl);
+      const client = createSchemaOptimizedPrismaClient(baseUrl, schemaName);
       
       // Test connection with timeout
       await Promise.race([
@@ -174,14 +195,15 @@ export async function getDatabaseConnection(
       ]);
 
       // Cache the successful connection
-      dbConnections.set(databaseId, {
+      schemaConnections.set(schemaName, {
         client,
         lastUsed: new Date(),
         isConnected: true,
         retryCount: 0,
+        schemaName,
       });
 
-      console.log(`Successfully connected to database: ${databaseId}`);
+      console.log(`Successfully connected to schema: ${schemaName}`);
       return client;
 
     } catch (error: any) {
@@ -189,205 +211,261 @@ export async function getDatabaseConnection(
       retryCount++;
       
       if (retryCount < CONNECTION_CONFIG.MAX_RETRIES) {
-        console.warn(`Connection attempt ${retryCount} failed for ${databaseId}, retrying...`);
+        console.warn(`Connection attempt ${retryCount} failed for schema ${schemaName}, retrying...`);
         await new Promise(resolve => setTimeout(resolve, CONNECTION_CONFIG.RETRY_DELAY * retryCount));
       }
     }
   }
 
-  throw new Error(`Failed to connect to database ${databaseId} after ${CONNECTION_CONFIG.MAX_RETRIES} attempts: ${lastError?.message}`);
+  throw new Error(`Failed to connect to schema ${schemaName} after ${CONNECTION_CONFIG.MAX_RETRIES} attempts: ${lastError?.message}`);
 }
 
 /**
- * Get database connection from session info with improved error handling
+ * Get schema connection from admin session info
  */
-export async function getDatabaseFromSession(
-  databaseId: string,
-  databaseUrl: string
-): Promise<{
+export async function getSchemaFromAdminSession(adminSession: {
+  schemaName: string;
+  adminId: number;
+}): Promise<{
   db: PrismaClient;
-  databaseInfo: {
-    id: string;
-    name: string;
-    displayName: string;
+  adminInfo: {
+    id: number;
+    schemaName: string;
+    displayName: string | null;
+    isActive: boolean;
   };
 }> {
-  let database;
+  console.log('Getting schema connection for admin:', {
+    schemaName: adminSession.schemaName,
+    adminId: adminSession.adminId
+  });
+
+  let admin;
   
   try {
-    // Use a timeout for master DB queries to prevent hanging
-    database = await Promise.race([
-      masterDb.database.findUnique({
-        where: { id: databaseId },
+    // Use a timeout for public DB queries to prevent hanging
+    admin = await Promise.race([
+      publicDb.admin.findUnique({
+        where: { id: adminSession.adminId },
         select: {
           id: true,
-          name: true,
+          schemaName: true,
           displayName: true,
           isActive: true,
         }
       }),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Master DB query timeout')), 10000)
+        setTimeout(() => reject(new Error('Public DB query timeout')), 10000)
       ),
     ]) as any;
 
   } catch (error: any) {
-    console.error(`Master DB query failed for database ${databaseId}:`, error);
-    throw new Error(`Master database query failed: ${error.message}`);
+    console.error(`Public DB query failed for admin ${adminSession.adminId}:`, error);
+    throw new Error(`Public database query failed: ${error.message}`);
   }
 
-  if (!database) {
-    throw new Error('Database not found');
+  if (!admin) {
+    throw new Error('Admin not found');
   }
 
-  if (!database.isActive) {
-    throw new Error('Database is not active');
+  if (!admin.isActive) {
+    throw new Error('Admin account is not active');
   }
 
-  // Get tenant database connection
-  const db = await getDatabaseConnection(databaseUrl, databaseId);
+  if (admin.schemaName !== adminSession.schemaName) {
+    throw new Error('Schema name mismatch');
+  }
+
+  // Get tenant schema connection
+  const db = await getSchemaConnection(admin.schemaName);
 
   return {
     db,
-    databaseInfo: {
-      id: database.id,
-      name: database.name,
-      displayName: database.displayName,
+    adminInfo: {
+      id: admin.id,
+      schemaName: admin.schemaName,
+      displayName: admin.displayName,
+      isActive: admin.isActive,
     },
   };
 }
 
 /**
- * Get admin database connection using admin session info
+ * Get admin database connection using admin ID
  */
-export async function getAdminDatabaseConnection(adminSession: {
-  databaseId: string;
-  databaseUrl: string;
-}): Promise<{
+export async function getAdminSchemaConnection(adminId: number): Promise<{
   db: PrismaClient;
-  databaseInfo: {
-    id: string;
-    name: string;
-    displayName: string;
+  adminInfo: {
+    id: number;
+    schemaName: string;
+    displayName: string | null;
+    isActive: boolean;
   };
 }> {
-  console.log('Getting admin database connection for:', {
-    databaseId: adminSession.databaseId,
-    hasUrl: !!adminSession.databaseUrl
-  });
+  console.log('Getting admin schema connection for admin ID:', adminId);
 
-  return getDatabaseFromSession(adminSession.databaseId, adminSession.databaseUrl);
-}
-
-/**
- * Get database connection by database ID (from master database lookup)
- */
-export async function getDatabaseById(databaseId: string): Promise<{
-  db: PrismaClient;
-  databaseInfo: {
-    id: string;
-    name: string;
-    displayName: string;
-    databaseUrl: string;
-  };
-}> {
-  let database;
+  let admin;
   
   try {
-    // Use timeout for master DB query
-    database = await Promise.race([
-      masterDb.database.findUnique({
-        where: { id: databaseId },
+    // Use timeout for public DB query
+    admin = await Promise.race([
+      publicDb.admin.findUnique({
+        where: { id: adminId },
+        select: {
+          id: true,
+          schemaName: true,
+          displayName: true,
+          isActive: true,
+        }
       }),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Master DB query timeout')), 10000)
+        setTimeout(() => reject(new Error('Public DB query timeout')), 10000)
       ),
     ]) as any;
 
   } catch (error: any) {
-    console.error(`Master DB query failed for database ${databaseId}:`, error);
-    throw new Error(`Master database query failed: ${error.message}`);
+    console.error(`Public DB query failed for admin ${adminId}:`, error);
+    throw new Error(`Public database query failed: ${error.message}`);
   }
 
-  if (!database) {
-    throw new Error('Database not found');
+  if (!admin) {
+    throw new Error('Admin not found');
   }
 
-  if (!database.isActive) {
-    throw new Error('Database is not active');
+  if (!admin.isActive) {
+    throw new Error('Admin account is not active');
   }
 
-  // Get connection to the specific database
-  const db = await getDatabaseConnection(database.databaseUrl, database.id);
+  // Get connection to the admin's schema
+  const db = await getSchemaConnection(admin.schemaName);
 
   return {
     db,
-    databaseInfo: {
-      id: database.id,
-      name: database.name,
-      displayName: database.displayName,
-      databaseUrl: database.databaseUrl,
+    adminInfo: {
+      id: admin.id,
+      schemaName: admin.schemaName,
+      displayName: admin.displayName,
+      isActive: admin.isActive,
     },
   };
 }
 
 /**
- * Get all active databases with timeout protection
+ * Get schema connection by schema name (with admin validation)
  */
-export async function getAllActiveDatabases(): Promise<Array<{
-  id: string;
-  name: string;
-  displayName: string;
-  databaseUrl: string;
+export async function getSchemaByName(schemaName: string): Promise<{
+  db: PrismaClient;
+  adminInfo: {
+    id: number;
+    schemaName: string;
+    displayName: string | null;
+    email: string;
+  };
+}> {
+  let admin;
+  
+  try {
+    // Use timeout for public DB query
+    admin = await Promise.race([
+      publicDb.admin.findUnique({
+        where: { schemaName: schemaName },
+        select: {
+          id: true,
+          schemaName: true,
+          displayName: true,
+          email: true,
+          isActive: true,
+        }
+      }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Public DB query timeout')), 10000)
+      ),
+    ]) as any;
+
+  } catch (error: any) {
+    console.error(`Public DB query failed for schema ${schemaName}:`, error);
+    throw new Error(`Public database query failed: ${error.message}`);
+  }
+
+  if (!admin) {
+    throw new Error('Schema not found');
+  }
+
+  if (!admin.isActive) {
+    throw new Error('Schema is not active');
+  }
+
+  // Get connection to the specific schema
+  const db = await getSchemaConnection(admin.schemaName);
+
+  return {
+    db,
+    adminInfo: {
+      id: admin.id,
+      schemaName: admin.schemaName,
+      displayName: admin.displayName,
+      email: admin.email,
+    },
+  };
+}
+
+/**
+ * Get all active schemas with timeout protection
+ */
+export async function getAllActiveSchemas(): Promise<Array<{
+  id: number;
+  schemaName: string;
+  displayName: string | null;
+  email: string;
   createdAt: Date;
 }>> {
   try {
-    const databases = await Promise.race([
-      masterDb.database.findMany({
+    const admins = await Promise.race([
+      publicDb.admin.findMany({
         where: { isActive: true },
         select: {
           id: true,
-          name: true,
+          schemaName: true,
           displayName: true,
-          databaseUrl: true,
+          email: true,
           createdAt: true,
         },
       }),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Master DB query timeout')), 15000)
+        setTimeout(() => reject(new Error('Public DB query timeout')), 15000)
       ),
     ]) as any;
 
-    return databases;
+    return admins;
   } catch (error: any) {
-    console.error('Failed to get active databases:', error);
-    throw new Error(`Failed to retrieve active databases: ${error.message}`);
+    console.error('Failed to get active schemas:', error);
+    throw new Error(`Failed to retrieve active schemas: ${error.message}`);
   }
 }
 
 /**
- * Execute a query across all active databases with improved error handling
+ * Execute a query across all active schemas with improved error handling
  */
-export async function executeAcrossAllDatabases<T>(
-  queryFunction: (db: PrismaClient, databaseInfo: any) => Promise<T>
-): Promise<Array<{ databaseId: string; result: T | null; error?: string }>> {
-  const databases = await getAllActiveDatabases();
-  const results: Array<{ databaseId: string; result: T | null; error?: string }> = [];
+export async function executeAcrossAllSchemas<T>(
+  queryFunction: (db: PrismaClient, adminInfo: any) => Promise<T>
+): Promise<Array<{ schemaName: string; result: T | null; error?: string }>> {
+  const admins = await getAllActiveSchemas();
+  const results: Array<{ schemaName: string; result: T | null; error?: string }> = [];
 
-  // Process databases in batches to avoid overwhelming the connection pool
+  // Process schemas in batches to avoid overwhelming the connection pool
   const batchSize = 3;
-  for (let i = 0; i < databases.length; i += batchSize) {
-    const batch = databases.slice(i, i + batchSize);
+  for (let i = 0; i < admins.length; i += batchSize) {
+    const batch = admins.slice(i, i + batchSize);
     
-    const batchPromises = batch.map(async (database) => {
+    const batchPromises = batch.map(async (admin) => {
       try {
-        const db = await getDatabaseConnection(database.databaseUrl, database.id);
-        const result = await queryFunction(db, database);
-        return { databaseId: database.id, result };
+        const db = await getSchemaConnection(admin.schemaName);
+        const result = await queryFunction(db, admin);
+        return { schemaName: admin.schemaName, result };
       } catch (error: any) {
-        console.error(`Error executing query on database ${database.name}:`, error);
+        console.error(`Error executing query on schema ${admin.schemaName}:`, error);
         return { 
-          databaseId: database.id, 
+          schemaName: admin.schemaName, 
           result: null, 
           error: error.message 
         };
@@ -402,50 +480,50 @@ export async function executeAcrossAllDatabases<T>(
 }
 
 /**
- * Disconnect a specific database connection
+ * Disconnect a specific schema connection
  */
-export async function disconnectDatabase(databaseId: string): Promise<void> {
-  const connectionInfo = dbConnections.get(databaseId);
+export async function disconnectSchema(schemaName: string): Promise<void> {
+  const connectionInfo = schemaConnections.get(schemaName);
   if (connectionInfo) {
     try {
       await connectionInfo.client.$disconnect();
-      dbConnections.delete(databaseId);
-      console.log(`Disconnected database: ${databaseId}`);
+      schemaConnections.delete(schemaName);
+      console.log(`Disconnected schema: ${schemaName}`);
     } catch (error) {
-      console.error(`Error disconnecting from database ${databaseId}:`, error);
+      console.error(`Error disconnecting from schema ${schemaName}:`, error);
       // Still remove from cache even if disconnect failed
-      dbConnections.delete(databaseId);
+      schemaConnections.delete(schemaName);
     }
   }
 }
 
 /**
- * Clean up all database connections
+ * Clean up all schema connections
  */
-export async function disconnectAllDatabases(): Promise<void> {
-  console.log('Disconnecting all database connections...');
+export async function disconnectAllSchemas(): Promise<void> {
+  console.log('Disconnecting all schema connections...');
   
-  // Disconnect master database
+  // Disconnect public database
   try {
-    await masterDb.$disconnect();
-    console.log('Master database disconnected');
+    await publicDb.$disconnect();
+    console.log('Public database disconnected');
   } catch (error) {
-    console.error('Error disconnecting master database:', error);
+    console.error('Error disconnecting public database:', error);
   }
 
-  // Disconnect all cached database connections
-  const disconnectPromises = Array.from(dbConnections.keys()).map(databaseId => 
-    disconnectDatabase(databaseId)
+  // Disconnect all cached schema connections
+  const disconnectPromises = Array.from(schemaConnections.keys()).map(schemaName => 
+    disconnectSchema(schemaName)
   );
 
   await Promise.all(disconnectPromises);
-  console.log(`Disconnected ${disconnectPromises.length} tenant databases`);
+  console.log(`Disconnected ${disconnectPromises.length} tenant schemas`);
 }
 
 /**
- * Test database connection with improved error handling
+ * Test schema connection with improved error handling
  */
-export async function testDatabaseConnection(databaseUrl: string): Promise<{
+export async function testSchemaConnection(schemaName: string): Promise<{
   success: boolean;
   error?: string;
   responseTime?: number;
@@ -454,7 +532,8 @@ export async function testDatabaseConnection(databaseUrl: string): Promise<{
   const startTime = Date.now();
   
   try {
-    testClient = createOptimizedPrismaClient(databaseUrl);
+    const baseUrl = getMasterDatabaseUrl();
+    testClient = createSchemaOptimizedPrismaClient(baseUrl, schemaName);
 
     // Test the connection with timeout
     await Promise.race([
@@ -486,55 +565,56 @@ export async function testDatabaseConnection(databaseUrl: string): Promise<{
 }
 
 /**
- * Create a new database entry in the master database
+ * Create a new admin entry in the public database
  */
-export async function createDatabase(databaseInfo: {
-  name: string;
-  displayName: string;
-  databaseUrl: string;
+export async function createAdminEntry(adminInfo: {
+  firstname: string;
+  lastname: string;
+  email: string;
+  password: string;
+  role: string;
+  schemaName: string;
+  displayName?: string;
   description?: string;
-  managedByAdminId: number;
+  maxUsers?: number;
+  maxStorage?: number;
 }): Promise<{
-  id: string;
-  name: string;
-  displayName: string;
-  databaseUrl: string;
+  id: number;
+  firstname: string;
+  lastname: string;
+  email: string;
+  role: string;
+  schemaName: string;
   isActive: boolean;
   createdAt: Date;
 }> {
-  // First test the connection
-  const connectionTest = await testDatabaseConnection(databaseInfo.databaseUrl);
-  
-  if (!connectionTest.success) {
-    throw new Error(`Cannot connect to database: ${connectionTest.error}`);
-  }
-
   try {
-    // Create the database record with timeout
-    const database = await Promise.race([
-      masterDb.database.create({
+    // Create the admin record with timeout
+    const admin = await Promise.race([
+      publicDb.admin.create({
         data: {
-          name: databaseInfo.name,
-          displayName: databaseInfo.displayName,
-          databaseUrl: databaseInfo.databaseUrl,
-          description: databaseInfo.description,
-          managedBy: {
-            connect: {
-              id: databaseInfo.managedByAdminId,
-            },
-          },
+          firstname: adminInfo.firstname,
+          lastname: adminInfo.lastname,
+          email: adminInfo.email,
+          password: adminInfo.password,
+          role: adminInfo.role,
+          schemaName: adminInfo.schemaName,
+          displayName: adminInfo.displayName,
+          description: adminInfo.description,
+          maxUsers: adminInfo.maxUsers,
+          maxStorage: adminInfo.maxStorage,
           isActive: true,
         },
       }),
       new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Database creation timeout')), 10000)
+        setTimeout(() => reject(new Error('Admin creation timeout')), 10000)
       ),
     ]) as any;
 
-    return database;
+    return admin;
   } catch (error: any) {
-    console.error('Failed to create database:', error);
-    throw new Error(`Database creation failed: ${error.message}`);
+    console.error('Failed to create admin:', error);
+    throw new Error(`Admin creation failed: ${error.message}`);
   }
 }
 
@@ -543,24 +623,24 @@ export async function createDatabase(databaseInfo: {
  */
 export function getConnectionPoolStats(): {
   totalConnections: number;
-  activeConnections: string[];
+  activeSchemas: string[];
   connectionDetails: Array<{
-    databaseId: string;
+    schemaName: string;
     lastUsed: Date;
     isConnected: boolean;
     retryCount: number;
   }>;
 } {
-  const connectionDetails = Array.from(dbConnections.entries()).map(([id, info]) => ({
-    databaseId: id,
+  const connectionDetails = Array.from(schemaConnections.entries()).map(([schema, info]) => ({
+    schemaName: schema,
     lastUsed: info.lastUsed,
     isConnected: info.isConnected,
     retryCount: info.retryCount,
   }));
 
   return {
-    totalConnections: dbConnections.size,
-    activeConnections: Array.from(dbConnections.keys()),
+    totalConnections: schemaConnections.size,
+    activeSchemas: Array.from(schemaConnections.keys()),
     connectionDetails,
   };
 }
@@ -572,22 +652,62 @@ export async function forceCleanupConnections(): Promise<void> {
   console.log('Force cleaning up all connections...');
   
   // Clear the connections map first to prevent new connections
-  const connectionIds = Array.from(dbConnections.keys());
-  dbConnections.clear();
+  const schemaNames = Array.from(schemaConnections.keys());
+  schemaConnections.clear();
   
   // Try to disconnect each connection
-  for (const id of connectionIds) {
+  for (const schemaName of schemaNames) {
     try {
-      const connectionInfo = dbConnections.get(id);
+      const connectionInfo = schemaConnections.get(schemaName);
       if (connectionInfo) {
         await connectionInfo.client.$disconnect();
       }
     } catch (error) {
-      console.error(`Error force disconnecting ${id}:`, error);
+      console.error(`Error force disconnecting ${schemaName}:`, error);
     }
   }
   
-  console.log(`Force cleaned up ${connectionIds.length} connections`);
+  console.log(`Force cleaned up ${schemaNames.length} connections`);
+}
+
+/**
+ * Utility function to get admin by email
+ */
+export async function getAdminByEmail(email: string): Promise<{
+  id: number;
+  firstname: string;
+  lastname: string;
+  email: string;
+  password: string;
+  role: string;
+  schemaName: string;
+  isActive: boolean;
+} | null> {
+  try {
+    const admin = await Promise.race([
+      publicDb.admin.findUnique({
+        where: { email: email },
+        select: {
+          id: true,
+          firstname: true,
+          lastname: true,
+          email: true,
+          password: true,
+          role: true,
+          schemaName: true,
+          isActive: true,
+        }
+      }),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Public DB query timeout')), 10000)
+      ),
+    ]) as any;
+
+    return admin;
+  } catch (error: any) {
+    console.error(`Failed to get admin by email ${email}:`, error);
+    throw new Error(`Failed to get admin: ${error.message}`);
+  }
 }
 
 // Enhanced graceful shutdown handler
@@ -596,7 +716,7 @@ const gracefulShutdown = async (signal: string) => {
   
   try {
     await Promise.race([
-      disconnectAllDatabases(),
+      disconnectAllSchemas(),
       new Promise((_, reject) => 
         setTimeout(() => reject(new Error('Shutdown timeout')), 10000)
       ),
@@ -616,24 +736,25 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 // Periodic cleanup of stale connections (every 5 minutes)
 setInterval(async () => {
   try {
-    await cleanupStaleConnections();
+    await cleanupStaleSchemaConnections();
   } catch (error) {
     console.error('Error during periodic cleanup:', error);
   }
 }, 5 * 60 * 1000);
 
 export default {
-  masterDb,
-  getDatabaseConnection,
-  getDatabaseFromSession,
-  getAdminDatabaseConnection,
-  getDatabaseById,
-  getAllActiveDatabases,
-  executeAcrossAllDatabases,
-  disconnectDatabase,
-  disconnectAllDatabases,
-  testDatabaseConnection,
-  createDatabase,
+  publicDb,
+  getSchemaConnection,
+  getSchemaFromAdminSession,
+  getAdminSchemaConnection,
+  getSchemaByName,
+  getAllActiveSchemas,
+  executeAcrossAllSchemas,
+  disconnectSchema,
+  disconnectAllSchemas,
+  testSchemaConnection,
+  createAdminEntry,
   getConnectionPoolStats,
   forceCleanupConnections,
+  getAdminByEmail,
 };

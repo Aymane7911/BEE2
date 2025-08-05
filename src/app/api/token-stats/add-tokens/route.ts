@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import { PrismaClient } from '@prisma/client';
 import { authenticateRequest } from "@/lib/auth";
-import { getPrismaClientByDatabaseId } from "@/lib/prisma-manager";
 
 // ======================= 
 // ✅ POST: Add tokens to user's balance
@@ -8,6 +8,8 @@ import { getPrismaClientByDatabaseId } from "@/lib/prisma-manager";
 export async function POST(request: NextRequest) {
   const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   console.log(`🚀 [${requestId}] POST /api/token-stats/add-tokens - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
 
   try {
     console.log(`🔐 [${requestId}] Authenticating request...`);
@@ -23,112 +25,157 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract userId and databaseId from the auth result
-    const { userId, databaseId } = authResult;
-    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Database ID:', databaseId);
-
-    // Get the correct databaseId from JWT and extract user email
-    const token = request.headers.get('authorization')?.replace('Bearer ', '');
-    let finalDatabaseId = databaseId;
-    let userEmail = null;
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
     
-    if (token) {
-      try {
-        const jwt = require('jsonwebtoken');
-        const payload = jwt.decode(token);
-        if (payload && payload.databaseId) {
-          finalDatabaseId = payload.databaseId;
-          userEmail = payload.email;
-          console.log(`[${requestId}] ▶ Using JWT databaseId:`, finalDatabaseId, 'email:', userEmail);
-        }
-      } catch (error) {
-        console.warn(`[${requestId}] ▶ Could not decode JWT for databaseId fix`);
-      }
-    }
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
 
-    if (!userEmail) {
-      console.error(`[${requestId}] ▶ No user email found in JWT`);
+    if (!userId || !schemaName) {
       return NextResponse.json(
-        { error: "Invalid authentication token" },
+        { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Get Prisma client for the specific database
-    const prisma = await getPrismaClientByDatabaseId(finalDatabaseId);
-    
-    if (!prisma) {
-      console.error(`[${requestId}] ▶ Could not get Prisma client for databaseId:`, finalDatabaseId);
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
       return NextResponse.json(
-        { error: "Database configuration not found" },
-        { status: 404 }
+        { error: "Invalid user ID" },
+        { status: 400 }
       );
     }
 
-    console.log(`[${requestId}] ▶ Using database ID:`, finalDatabaseId);
-
-    // FIND THE CORRECT USER ID IN THE TARGET DATABASE
-    // The user might have different IDs in different databases
-    const userInTargetDb = await prisma.beeusers.findFirst({
-      where: { 
-        email: userEmail
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
       }
     });
 
-    if (!userInTargetDb) {
-      console.error(`[${requestId}] ▶ User not found in target database:`, finalDatabaseId);
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
+
+    // Verify user exists in the tenant schema
+    const userInSchema = await prisma.beeusers.findUnique({
+      where: { id: userIdInt },
+      select: { 
+        id: true, 
+        email: true, 
+        isAdmin: true,
+        isPremium: true,
+        firstname: true,
+        lastname: true 
+      }
+    });
+
+    if (!userInSchema) {
+      console.error(`[${requestId}] ▶ User not found in schema:`, schemaName);
       return NextResponse.json(
-        { error: "User not found in target database. Please contact support." },
+        { error: "User not found in tenant schema. Please contact support." },
         { status: 404 }
       );
     }
 
-    const targetUserId = userInTargetDb.id;
-    console.log(`[${requestId}] ▶ Using target database user ID:`, targetUserId);
+    console.log(`[${requestId}] ▶ Using user:`, userInSchema.email);
 
     const body = await request.json();
     console.log(`📥 [${requestId}] Request body:`, body);
 
-    const tokensToAdd = parseInt(String(body.tokensToAdd || 0), 10);
-    if (tokensToAdd <= 0) {
-      console.log(`❌ [${requestId}] Invalid tokens amount: ${tokensToAdd}`);
-      return NextResponse.json({ error: "Tokens to add must be greater than 0" }, { status: 400 });
-    }
-    console.log(`📊 [${requestId}] Adding ${tokensToAdd} tokens to user ${targetUserId}`);
+    const { tokensToAdd, targetUserId, reason } = body;
 
-    // Find or create tokenStats
+    // Parse and validate tokens to add
+    const tokensToAddInt = parseInt(String(tokensToAdd || 0), 10);
+    if (tokensToAddInt <= 0) {
+      console.log(`❌ [${requestId}] Invalid tokens amount: ${tokensToAddInt}`);
+      return NextResponse.json({ 
+        error: "Tokens to add must be greater than 0",
+        provided: tokensToAddInt 
+      }, { status: 400 });
+    }
+
+    // Determine target user (self or another user if admin)
+    let finalTargetUserId = userIdInt;
+    let targetUser: typeof userInSchema = userInSchema;
+
+    if (targetUserId && targetUserId !== userIdInt) {
+      // Adding tokens to another user - requires admin privileges
+      if (!userInSchema.isAdmin) {
+        console.log(`❌ [${requestId}] Non-admin user trying to add tokens to another user`);
+        return NextResponse.json({ 
+          error: "Admin privileges required to add tokens to other users" 
+        }, { status: 403 });
+      }
+
+      finalTargetUserId = parseInt(String(targetUserId));
+      if (isNaN(finalTargetUserId)) {
+        return NextResponse.json(
+          { error: "Invalid target user ID" },
+          { status: 400 }
+        );
+      }
+
+      // Verify target user exists - FIXED: Include isAdmin in select
+      const foundTargetUser = await prisma.beeusers.findUnique({
+        where: { id: finalTargetUserId },
+        select: { 
+          id: true, 
+          email: true, 
+          isPremium: true,
+          isAdmin: true,      // ✅ Added this field
+          firstname: true,
+          lastname: true 
+        }
+      });
+
+      if (!foundTargetUser) {
+        console.error(`[${requestId}] ▶ Target user not found:`, finalTargetUserId);
+        return NextResponse.json(
+          { error: "Target user not found in tenant schema" },
+          { status: 404 }
+        );
+      }
+
+      targetUser = foundTargetUser;
+    }
+
+    console.log(`📊 [${requestId}] Adding ${tokensToAddInt} tokens to user ${finalTargetUserId} (${targetUser.email})`);
+    if (reason) {
+      console.log(`📝 [${requestId}] Reason: ${reason}`);
+    }
+
+    // Find or create tokenStats (no databaseId needed in schema-per-tenant)
     let tokenStats = await prisma.tokenStats.findUnique({ 
       where: { 
-        userId: targetUserId,
-        databaseId: finalDatabaseId
+        userId: finalTargetUserId
       } 
     });
     
     if (tokenStats) {
       tokenStats = await prisma.tokenStats.update({
         where: { 
-          userId: targetUserId,
-          databaseId: finalDatabaseId
+          userId: finalTargetUserId
         },
         data: {
-          totalTokens: tokenStats.totalTokens + tokensToAdd,
-          remainingTokens: tokenStats.remainingTokens + tokensToAdd,
+          totalTokens: tokenStats.totalTokens + tokensToAddInt,
+          remainingTokens: tokenStats.remainingTokens + tokensToAddInt,
         },
       });
-      console.log(`📊 [${requestId}] Updated stats: Total=${tokenStats.totalTokens}, Remaining=${tokenStats.remainingTokens}`);
+      console.log(`📊 [${requestId}] Updated existing stats: Total=${tokenStats.totalTokens}, Remaining=${tokenStats.remainingTokens}`);
     } else {
+      // Create new token stats for the user
       tokenStats = await prisma.tokenStats.create({
         data: {
-          userId: targetUserId,
-          totalTokens: tokensToAdd,
-          remainingTokens: tokensToAdd,
+          userId: finalTargetUserId,
+          totalTokens: tokensToAddInt,
+          remainingTokens: tokensToAddInt,
           originOnly: 0,
           qualityOnly: 0,
           bothCertifications: 0,
-          databaseId: finalDatabaseId,
         },
       });
-      console.log(`📊 [${requestId}] Created stats:`, tokenStats);
+      console.log(`📊 [${requestId}] Created new stats:`, tokenStats);
     }
 
     // Auto-correct remaining tokens if mismatch
@@ -138,19 +185,43 @@ export async function POST(request: NextRequest) {
       console.warn(`⚠️ [${requestId}] Remaining mismatch: expected=${expectedRemaining}, actual=${tokenStats.remainingTokens}`);
       tokenStats = await prisma.tokenStats.update({
         where: { 
-          userId: targetUserId,
-          databaseId: finalDatabaseId
+          userId: finalTargetUserId
         },
         data: { remainingTokens: expectedRemaining },
       });
       console.log(`🔧 [${requestId}] Corrected remaining to ${expectedRemaining}`);
     }
 
-    console.log(`✅ [${requestId}] Final stats:`, tokenStats);
+    const finalStats = {
+      ...tokenStats,
+      usedTokens
+    };
+
+    console.log(`✅ [${requestId}] Final stats:`, finalStats);
+    
+    const responseMessage = finalTargetUserId === userIdInt 
+      ? `Successfully added ${tokensToAddInt} tokens to your account`
+      : `Successfully added ${tokensToAddInt} tokens to ${targetUser.email}'s account`;
+
     return NextResponse.json({
       success: true,
-      message: `Successfully added ${tokensToAdd} tokens`,
-      tokenStats: { ...tokenStats, usedTokens },
+      message: responseMessage,
+      addedTokens: tokensToAddInt,
+      reason: reason || null,
+      tokenStats: finalStats,
+      targetUser: {
+        id: targetUser.id,
+        email: targetUser.email,
+        name: `${targetUser.firstname} ${targetUser.lastname}`,
+        isPremium: targetUser.isPremium,
+        isAdmin: targetUser.isAdmin    // ✅ Now this field is available
+      },
+      performedBy: {
+        id: userInSchema.id,
+        email: userInSchema.email,
+        name: `${userInSchema.firstname} ${userInSchema.lastname}`,
+        isAdmin: userInSchema.isAdmin
+      }
     });
 
   } catch (error: any) {
@@ -166,6 +237,17 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    // Handle unique constraint violations
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
+      return NextResponse.json(
+        {
+          error: 'Token stats already exist for this user',
+          details: 'Unique constraint violation',
+        },
+        { status: 409 }
+      );
+    }
     
     return NextResponse.json(
       { 
@@ -175,6 +257,357 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
     console.log(`🏁 [${requestId}] Request completed`);
+  }
+}
+
+// ======================= 
+// ✅ GET: Get current token balance for user or admin view
+// ======================= 
+export async function GET(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] GET /api/token-stats/add-tokens - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
+  try {
+    const authResult = await authenticateRequest(request);
+        
+    if (!authResult) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
+      return NextResponse.json(
+        { error: "Invalid user ID" },
+        { status: 400 }
+      );
+    }
+
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
+
+    // Get user info
+    const userInSchema = await prisma.beeusers.findUnique({
+      where: { id: userIdInt },
+      select: { 
+        id: true, 
+        email: true, 
+        isAdmin: true,
+        isPremium: true,
+        firstname: true,
+        lastname: true 
+      }
+    });
+
+    if (!userInSchema) {
+      return NextResponse.json(
+        { error: "User not found in tenant schema" },
+        { status: 404 }
+      );
+    }
+
+    const { searchParams } = new URL(request.url);
+    const targetUserId = searchParams.get('userId');
+
+    let finalTargetUserId = userIdInt;
+    let targetUser: typeof userInSchema = userInSchema;
+
+    // If requesting another user's data, check admin privileges
+    if (targetUserId && parseInt(targetUserId) !== userIdInt) {
+      if (!userInSchema.isAdmin) {
+        return NextResponse.json({ 
+          error: "Admin privileges required to view other users' token stats" 
+        }, { status: 403 });
+      }
+
+      finalTargetUserId = parseInt(targetUserId);
+      if (isNaN(finalTargetUserId)) {
+        return NextResponse.json(
+          { error: "Invalid target user ID" },
+          { status: 400 }
+        );
+      }
+
+      // FIXED: Include isAdmin in select
+      const foundTargetUser = await prisma.beeusers.findUnique({
+        where: { id: finalTargetUserId },
+        select: { 
+          id: true, 
+          email: true, 
+          isPremium: true,
+          isAdmin: true,      // ✅ Added this field
+          firstname: true,
+          lastname: true 
+        }
+      });
+
+      if (!foundTargetUser) {
+        return NextResponse.json(
+          { error: "Target user not found" },
+          { status: 404 }
+        );
+      }
+
+      targetUser = foundTargetUser;
+    }
+
+    // Get token stats
+    const tokenStats = await prisma.tokenStats.findUnique({
+      where: { userId: finalTargetUserId }
+    });
+
+    if (!tokenStats) {
+      return NextResponse.json({
+        userId: finalTargetUserId,
+        totalTokens: 0,
+        remainingTokens: 0,
+        originOnly: 0,
+        qualityOnly: 0,
+        bothCertifications: 0,
+        usedTokens: 0,
+        targetUser: {
+          id: targetUser.id,
+          email: targetUser.email,
+          name: `${targetUser.firstname} ${targetUser.lastname}`,
+          isPremium: targetUser.isPremium,
+          isAdmin: targetUser.isAdmin    // ✅ Now this field is available
+        }
+      });
+    }
+
+    const usedTokens = tokenStats.originOnly + tokenStats.qualityOnly + tokenStats.bothCertifications;
+
+    return NextResponse.json({
+      id: tokenStats.id,
+      userId: tokenStats.userId,
+      totalTokens: tokenStats.totalTokens,
+      remainingTokens: tokenStats.remainingTokens,
+      originOnly: tokenStats.originOnly,
+      qualityOnly: tokenStats.qualityOnly,
+      bothCertifications: tokenStats.bothCertifications,
+      usedTokens: usedTokens,
+      targetUser: {
+        id: targetUser.id,
+        email: targetUser.email,
+        name: `${targetUser.firstname} ${targetUser.lastname}`,
+        isPremium: targetUser.isPremium,
+        isAdmin: targetUser.isAdmin    // ✅ Now this field is available
+      }
+    });
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
+    
+    return NextResponse.json(
+      { 
+        error: "Failed to fetch token stats", 
+        details: error.message 
+      }, 
+      { status: 500 }
+    );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] GET request completed`);
+  }
+}
+
+// ======================= 
+// ✅ DELETE: Remove tokens from user's balance (Admin only)
+// ======================= 
+export async function DELETE(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] DELETE /api/token-stats/add-tokens - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
+  try {
+    const authResult = await authenticateRequest(request);
+        
+    if (!authResult) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
+      return NextResponse.json(
+        { error: "Invalid user ID" },
+        { status: 400 }
+      );
+    }
+
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
+
+    // Verify user is admin
+    const userInSchema = await prisma.beeusers.findUnique({
+      where: { id: userIdInt },
+      select: { 
+        id: true, 
+        email: true, 
+        isAdmin: true,
+        firstname: true,
+        lastname: true 
+      }
+    });
+
+    if (!userInSchema || !userInSchema.isAdmin) {
+      return NextResponse.json({ 
+        error: "Admin privileges required" 
+      }, { status: 403 });
+    }
+
+    const body = await request.json();
+    const { tokensToRemove, targetUserId, reason } = body;
+
+    const tokensToRemoveInt = parseInt(String(tokensToRemove || 0), 10);
+    if (tokensToRemoveInt <= 0) {
+      return NextResponse.json({ 
+        error: "Tokens to remove must be greater than 0" 
+      }, { status: 400 });
+    }
+
+    const finalTargetUserId = parseInt(String(targetUserId || userIdInt));
+    if (isNaN(finalTargetUserId)) {
+      return NextResponse.json(
+        { error: "Invalid target user ID" },
+        { status: 400 }
+      );
+    }
+
+    // Verify target user exists - FIXED: Include both isPremium and isAdmin
+    const foundTargetUser = await prisma.beeusers.findUnique({
+      where: { id: finalTargetUserId },
+      select: { 
+        id: true, 
+        email: true, 
+        isPremium: true,    // ✅ Added this field
+        isAdmin: true,      // ✅ Added this field
+        firstname: true,
+        lastname: true 
+      }
+    });
+
+    if (!foundTargetUser) {
+      return NextResponse.json(
+        { error: "Target user not found" },
+        { status: 404 }
+      );
+    }
+
+    const targetUser = foundTargetUser;
+
+    // Get current token stats
+    const currentStats = await prisma.tokenStats.findUnique({
+      where: { userId: finalTargetUserId }
+    });
+
+    if (!currentStats) {
+      return NextResponse.json(
+        { error: "User has no token stats to modify" },
+        { status: 404 }
+      );
+    }
+
+    // Calculate new balances
+    const newTotalTokens = Math.max(0, currentStats.totalTokens - tokensToRemoveInt);
+    const newRemainingTokens = Math.max(0, currentStats.remainingTokens - tokensToRemoveInt);
+
+    // Update token stats
+    const updatedStats = await prisma.tokenStats.update({
+      where: { userId: finalTargetUserId },
+      data: {
+        totalTokens: newTotalTokens,
+        remainingTokens: newRemainingTokens,
+      },
+    });
+
+    const usedTokens = updatedStats.originOnly + updatedStats.qualityOnly + updatedStats.bothCertifications;
+
+    console.log(`✅ [${requestId}] Removed ${tokensToRemoveInt} tokens from user ${targetUser.email}`);
+
+    return NextResponse.json({
+      success: true,
+      message: `Successfully removed ${tokensToRemoveInt} tokens from ${targetUser.email}'s account`,
+      removedTokens: tokensToRemoveInt,
+      reason: reason || null,
+      tokenStats: {
+        ...updatedStats,
+        usedTokens
+      },
+      targetUser: {
+        id: targetUser.id,
+        email: targetUser.email,
+        name: `${targetUser.firstname} ${targetUser.lastname}`,
+        isPremium: targetUser.isPremium,   // ✅ Now this field is available
+        isAdmin: targetUser.isAdmin        // ✅ Now this field is available
+      },
+      performedBy: {
+        id: userInSchema.id,
+        email: userInSchema.email,
+        name: `${userInSchema.firstname} ${userInSchema.lastname}`,
+        isAdmin: userInSchema.isAdmin
+      }
+    });
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
+    
+    return NextResponse.json(
+      { 
+        error: "Failed to remove tokens", 
+        details: error.message 
+      }, 
+      { status: 500 }
+    );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] DELETE request completed`);
   }
 }

@@ -1,53 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
 import { PrismaClient } from "@prisma/client";
 import { authenticateRequest } from "@/lib/auth";
-import { getPrismaClientByDatabaseId } from "@/lib/prisma-manager";
 
+// GET - Fetch batches for authenticated user
 export async function GET(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] GET /api/batches - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
   try {
+    console.log(`🔐 [${requestId}] Authenticating request...`);
+    
     const authResult = await authenticateRequest(request);
         
     if (!authResult) {
-      console.warn('[GET /api/batches] ▶ No authenticated user found');
+      console.log(`❌ [${requestId}] Authentication failed`);
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Handle both string and object returns from authenticateRequest
-    const userId = typeof authResult === 'string' ? authResult : authResult.userId;
-    const databaseId = typeof authResult === 'object' ? authResult.databaseId : null;
-    const userIdInt = parseInt(userId);
-        
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
+
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userIdInt = parseInt(String(userId));
     if (isNaN(userIdInt)) {
-      console.error('[GET /api/batches] ▶ Invalid user ID format:', userId);
       return NextResponse.json(
         { error: "Invalid user ID format" },
         { status: 400 }
       );
     }
 
-    if (!databaseId) {
-      console.error('[GET /api/batches] ▶ No database ID found in auth result');
-      return NextResponse.json(
-        { error: "Database ID not found" },
-        { status: 400 }
-      );
-    }
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
 
-    console.log(`[GET /api/batches] ▶ Fetching batches for user: ${userIdInt}, database: ${databaseId}`);
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
 
-    // Get the appropriate Prisma client for this tenant
-    const prisma = await getPrismaClientByDatabaseId(databaseId);
-    if (!prisma) {
-      console.error(`[GET /api/batches] ▶ Failed to get Prisma client for database: ${databaseId}`);
-      return NextResponse.json(
-        { error: "Database connection failed" },
-        { status: 500 }
-      );
-    }
-
+    // Fetch batches for the user
     const batches = await prisma.batch.findMany({
       where: {
         userId: userIdInt,
@@ -70,34 +77,61 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    console.log(`[GET /api/batches] ▶ Found ${batches.length} batches for user ${userIdInt}`);
+    console.log(`✅ [${requestId}] Found ${batches.length} batches for user ${userIdInt}`);
 
     return NextResponse.json({ batches });
-  } catch (error) {
-    console.error("[GET /api/batches] ▶ Error:", error);
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
     return NextResponse.json(
-      { error: "Failed to fetch batches" },
+      { 
+        error: "Failed to fetch batches",
+        details: error.message 
+      },
       { status: 500 }
     );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] GET request completed`);
   }
 }
 
+// POST - Create a new batch
 export async function POST(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] POST /api/batches - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
   try {
+    console.log(`🔐 [${requestId}] Authenticating request...`);
+    
     const authResult = await authenticateRequest(request);
              
     if (!authResult) {
+      console.log(`❌ [${requestId}] Authentication failed`);
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Handle both string and object returns from authenticateRequest
-    const userId = typeof authResult === 'string' ? authResult : authResult.userId;
-    const databaseId = typeof authResult === 'object' ? authResult.databaseId : null;
-    const userIdInt = parseInt(userId);
-             
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
+
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userIdInt = parseInt(String(userId));
     if (isNaN(userIdInt)) {
       return NextResponse.json(
         { error: "Invalid user ID format" },
@@ -105,30 +139,25 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!databaseId) {
-      return NextResponse.json(
-        { error: "Database ID not found" },
-        { status: 400 }
-      );
-    }
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
 
-    // Get the appropriate Prisma client for this tenant
-    const prisma = await getPrismaClientByDatabaseId(databaseId);
-    if (!prisma) {
-      console.error(`[POST /api/batches] ▶ Failed to get Prisma client for database: ${databaseId}`);
-      return NextResponse.json(
-        { error: "Database connection failed" },
-        { status: 500 }
-      );
-    }
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
 
-    // Get the user's databaseId from the tenant database
+    // Verify user exists
     const user = await prisma.beeusers.findUnique({
       where: { id: userIdInt },
-      select: { databaseId: true }
+      select: { id: true, email: true }
     });
     
     if (!user) {
+      console.error(`[${requestId}] ▶ User not found:`, userIdInt);
       return NextResponse.json(
         { error: "User not found" },
         { status: 404 }
@@ -137,6 +166,8 @@ export async function POST(request: NextRequest) {
       
     const body = await request.json();
     const { apiaries, ...batchData } = body;
+
+    console.log(`📥 [${requestId}] Request body:`, { batchData, apiariesCount: apiaries?.length || 0 });
 
     // Validate required fields
     if (!batchData.batchNumber) {
@@ -160,14 +191,13 @@ export async function POST(request: NextRequest) {
       return parsed;
     };
 
-    console.log(`[POST /api/batches] ▶ Creating batch for user: ${userIdInt}, database: ${databaseId}`);
+    console.log(`📦 [${requestId}] Creating batch for user: ${userIdInt}`);
  
     const batch = await prisma.batch.create({
       data: {
         ...batchData,
         weightKg: parseFloat(batchData.weightKg) || 0, // This is the total honey collected
         userId: userIdInt,
-        databaseId: user.databaseId, // Add the required databaseId
         // Initialize honey tracking fields
         totalHoneyCollected: parseFloat(batchData.weightKg) || 0, // Same as weightKg for consistency
         honeyCertified: 0, // No honey certified initially
@@ -182,7 +212,6 @@ export async function POST(request: NextRequest) {
             latitude: parseCoordinate(apiary.latitude),
             longitude: parseCoordinate(apiary.longitude),
             userId: userIdInt, // Add userId for apiary
-            databaseId: user.databaseId, // Add the required databaseId
           })) || []
         }
       },
@@ -191,67 +220,96 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    console.log(`[POST /api/batches] ▶ Created batch: ${batch.id} for user: ${userIdInt}`);
+    console.log(`✅ [${requestId}] Created batch: ${batch.id} for user: ${userIdInt}`);
  
     return NextResponse.json(batch, { status: 201 });
-  } catch (error) {
-    console.error("[POST /api/batches] ▶ Error:", error);
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
     
     // Handle Prisma-specific errors
     if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
-  return NextResponse.json(
-    { error: "Batch number already exists" },
-    { status: 409 }
-  );
-}
+      return NextResponse.json(
+        { error: "Batch number already exists" },
+        { status: 409 }
+      );
+    }
     
     return NextResponse.json(
-      { error: "Failed to create batch" },
+      { 
+        error: "Failed to create batch",
+        details: error.message 
+      },
       { status: 500 }
     );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] POST request completed`);
   }
 }
 
+// PUT - Update an existing batch
 export async function PUT(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] PUT /api/batches - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
   try {
+    console.log(`🔐 [${requestId}] Authenticating request...`);
+    
     // Authentication - get userId and convert to number
     const authResult = await authenticateRequest(request);
     if (!authResult) {
+      console.log(`❌ [${requestId}] Authentication failed`);
       return NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
     }
 
-    // Handle both string and object returns from authenticateRequest
-    const userIdString = typeof authResult === 'string' ? authResult : authResult.userId;
-    const databaseId = typeof authResult === 'object' ? authResult.databaseId : null;
-    const userId = parseInt(userIdString);
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
 
-    if (!databaseId) {
+    if (!userId || !schemaName) {
       return NextResponse.json(
-        { error: "Database ID not found" },
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
+      return NextResponse.json(
+        { error: "Invalid user ID format" },
         { status: 400 }
       );
     }
 
-    // Get the appropriate Prisma client for this tenant
-    const prisma = await getPrismaClientByDatabaseId(databaseId);
-    if (!prisma) {
-      console.error(`[PUT /api/batches] ▶ Failed to get Prisma client for database: ${databaseId}`);
-      return NextResponse.json(
-        { error: "Database connection failed" },
-        { status: 500 }
-      );
-    }
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
 
-    // Get the user's databaseId from the tenant database
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
+
+    // Verify user exists
     const user = await prisma.beeusers.findUnique({
-      where: { id: userId },
-      select: { databaseId: true }
+      where: { id: userIdInt },
+      select: { id: true, email: true }
     });
     
     if (!user) {
+      console.error(`[${requestId}] ▶ User not found:`, userIdInt);
       return NextResponse.json(
         { error: "User not found" },
         { status: 404 }
@@ -271,6 +329,8 @@ export async function PUT(request: NextRequest) {
     
     const { batchId, updatedFields, apiaries, batchJars, jarCertifications } = data;
 
+    console.log(`📥 [${requestId}] Request data:`, { batchId, updatedFields, apiariesCount: apiaries?.length || 0 });
+
     if (!batchId) {
       return NextResponse.json(
         { error: 'Batch ID is required' },
@@ -278,13 +338,13 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    console.log(`[PUT /api/batches] ▶ Updating batch: ${batchId} for user: ${userId}, database: ${databaseId}`);
+    console.log(`🔄 [${requestId}] Updating batch: ${batchId} for user: ${userIdInt}`);
 
     // Get the original batch to understand current state
     const originalBatch = await prisma.batch.findFirst({
       where: { 
         id: batchId,
-        userId: userId // Ensure user owns this batch
+        userId: userIdInt // Ensure user owns this batch
       },
       select: { 
         weightKg: true, // This is the total honey collected
@@ -295,6 +355,7 @@ export async function PUT(request: NextRequest) {
     });
 
     if (!originalBatch) {
+      console.error(`[${requestId}] ▶ Batch not found or access denied:`, batchId);
       return NextResponse.json(
         { error: 'Batch not found or access denied' },
         { status: 404 }
@@ -438,9 +499,8 @@ export async function PUT(request: NextRequest) {
                 latitude: parseCoordinateForUpdate(apiaryData.latitude),
                 longitude: parseCoordinateForUpdate(apiaryData.longitude),
                 kilosCollected: apiaryData.kilosCollected || 0,
-                databaseId: user.databaseId,
                 batchId: batchId,
-                userId: userId
+                userId: userIdInt
               }
             });
           }
@@ -450,7 +510,7 @@ export async function PUT(request: NextRequest) {
       return batch;
     });
 
-    console.log('Batch update summary:', {
+    console.log(`✅ [${requestId}] Batch update summary:`, {
       batchId,
       totalHoneyCollected,
       totalHoneyCertifiedInThisSession,
@@ -478,71 +538,88 @@ export async function PUT(request: NextRequest) {
       }
     });
 
-  } catch (error) {
-    console.error('Error updating batch:', error);
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
     return NextResponse.json(
-      { error: 'Failed to update batch' },
+      { 
+        error: 'Failed to update batch',
+        details: error.message 
+      },
       { status: 500 }
     );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] PUT request completed`);
   }
 }
 
+// DELETE - Delete a batch
 export async function DELETE(request: NextRequest) {
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] DELETE /api/batches - Starting request`);
+  
+  let prisma: PrismaClient | null = null;
+
   try {
+    console.log(`🔐 [${requestId}] Authenticating request...`);
+    
     const authResult = await authenticateRequest(request);
         
     if (!authResult) {
-      console.warn('[DELETE /api/batches] ▶ No authenticated user found');
+      console.log(`❌ [${requestId}] Authentication failed`);
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Handle both string and object returns from authenticateRequest
-    const userId = typeof authResult === 'string' ? authResult : authResult.userId;
-    const databaseId = typeof authResult === 'object' ? authResult.databaseId : null;
-    const userIdInt = parseInt(userId);
-        
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
+
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
+
+    const userIdInt = parseInt(String(userId));
     if (isNaN(userIdInt)) {
-      console.error('[DELETE /api/batches] ▶ Invalid user ID format:', userId);
       return NextResponse.json(
         { error: "Invalid user ID format" },
         { status: 400 }
       );
     }
 
-    if (!databaseId) {
-      console.error('[DELETE /api/batches] ▶ No database ID found in auth result');
-      return NextResponse.json(
-        { error: "Database ID not found" },
-        { status: 400 }
-      );
-    }
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
 
-    // Get the appropriate Prisma client for this tenant
-    const prisma = await getPrismaClientByDatabaseId(databaseId);
-    if (!prisma) {
-      console.error(`[DELETE /api/batches] ▶ Failed to get Prisma client for database: ${databaseId}`);
-      return NextResponse.json(
-        { error: "Database connection failed" },
-        { status: 500 }
-      );
-    }
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
 
     // Extract batchId from URL parameters
     const { searchParams } = new URL(request.url);
     const batchId = searchParams.get('batchId');
     
     if (!batchId) {
-      console.error('[DELETE /api/batches] ▶ No batch ID provided');
+      console.error(`[${requestId}] ▶ No batch ID provided`);
       return NextResponse.json(
         { error: "Batch ID is required" },
         { status: 400 }
       );
     }
 
-    console.log(`[DELETE /api/batches] ▶ Attempting to delete batch: ${batchId} for user: ${userIdInt}, database: ${databaseId}`);
+    console.log(`🗑️ [${requestId}] Attempting to delete batch: ${batchId} for user: ${userIdInt}`);
 
     // Verify the batch exists and belongs to the authenticated user
     const existingBatch = await prisma.batch.findFirst({
@@ -556,7 +633,7 @@ export async function DELETE(request: NextRequest) {
     });
 
     if (!existingBatch) {
-      console.warn(`[DELETE /api/batches] ▶ Batch not found or access denied: ${batchId}`);
+      console.warn(`[${requestId}] ▶ Batch not found or access denied: ${batchId}`);
       return NextResponse.json(
         { error: "Batch not found or access denied" },
         { status: 404 }
@@ -583,10 +660,11 @@ export async function DELETE(request: NextRequest) {
       });
     });
 
-    console.log(`[DELETE /api/batches] ▶ Successfully deleted batch: ${batchId} and unlinked ${existingBatch.apiaries.length} apiaries`);
+    console.log(`✅ [${requestId}] Successfully deleted batch: ${batchId} and unlinked ${existingBatch.apiaries.length} apiaries`);
 
     return NextResponse.json(
       { 
+        success: true,
         message: "Batch deleted successfully. Apiary locations have been preserved.",
         deletedBatch: {
           id: batchId,
@@ -597,11 +675,19 @@ export async function DELETE(request: NextRequest) {
       { status: 200 }
     );
 
-  } catch (error) {
-    console.error("[DELETE /api/batches] ▶ Error:", error);
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
     return NextResponse.json(
-      { error: "Failed to delete batch" },
+      { 
+        error: "Failed to delete batch",
+        details: error.message 
+      },
       { status: 500 }
     );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] DELETE request completed`);
   }
 }

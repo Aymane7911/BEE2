@@ -1,7 +1,7 @@
-// app/api/admin/dashboard/route.ts
+// app/api/admin/dashboard/route.ts - Schema-per-Tenant Version
 import { NextRequest, NextResponse } from 'next/server';
-import { getAdminFromRequest } from '@/lib/admin-auth';
-import { masterDb, getAdminDatabaseConnection, getConnectionPoolStats } from '@/lib/database-connection';
+import { PrismaClient } from '@prisma/client';
+import { getMasterPrismaClient } from '@/lib/prisma-manager';
 
 interface DashboardData {
   success: boolean;
@@ -13,11 +13,15 @@ interface DashboardData {
       lastname: string;
       email: string;
       role: string;
+      schemaName: string;
+      displayName: string;
     };
-    database: {
-      id: string;
+    schema: {
       name: string;
       displayName: string;
+      description?: string;
+      maxUsers: number;
+      maxStorage: number;
     };
     adminUser?: {
       id: number;
@@ -72,12 +76,39 @@ interface DashboardData {
   };
 }
 
+// Get master database URL with fallback
+function getMasterDatabaseUrl(): string {
+  const masterUrl = process.env.MASTER_DATABASE_URL || 
+                   process.env.DATABASE_URL || 
+                   process.env.POSTGRES_URL || 
+                   '';
+  
+  if (!masterUrl || masterUrl.trim() === '') {
+    throw new Error('Master database URL is not configured');
+  }
+  
+  return masterUrl;
+}
+
+// Create schema-specific Prisma client
+function createSchemaPrismaClient(schemaName: string): PrismaClient {
+  const baseUrl = getMasterDatabaseUrl();
+  const schemaUrl = `${baseUrl}?schema=${schemaName}`;
+
+  return new PrismaClient({
+    datasources: {
+      db: {
+        url: schemaUrl,
+      },
+    },
+  });
+}
+
 export async function GET(request: NextRequest): Promise<NextResponse<DashboardData>> {
   const startTime = Date.now();
   
   try {
-    console.log('=== Dashboard API Debug ===');
-    console.log('Connection pool stats:', getConnectionPoolStats());
+    console.log('=== Dashboard API Debug (Schema-per-Tenant) ===');
     
     // Enhanced cookie debugging
     const cookies = request.cookies;
@@ -127,15 +158,16 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
         adminId: decoded.adminId,
         email: decoded.email,
         role: decoded.role,
-        databaseId: decoded.databaseId,
-        databaseUrl: decoded.databaseUrl
+        schemaName: decoded.schemaName || decoded.databaseId // Support both for migration
       };
       
       console.log('JWT decoded successfully:', {
         adminId: adminSession.adminId,
         email: adminSession.email,
-        databaseId: adminSession.databaseId,
-        hasDatabaseUrl: !!adminSession.databaseUrl
+        schemaName: adminSession.schemaName,
+        hasSchemaName: !!decoded.schemaName,
+        hasDatabaseId: !!decoded.databaseId,
+        decodedKeys: Object.keys(decoded)
       });
     } catch (jwtError) {
       console.error('JWT verification failed:', jwtError);
@@ -146,19 +178,60 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
     }
     
     // Validate required session data
-    if (!adminSession.adminId || !adminSession.databaseId) {
-      console.log('Invalid session data:', adminSession);
+    if (!adminSession.adminId) {
+      console.log('Missing adminId in session data:', adminSession);
       return NextResponse.json(
         { success: false, error: 'Invalid session data. Please log in again.' },
         { status: 401 }
       );
     }
     
-    console.log('Verifying database exists in master database...');
+    // Get master database connection
+    const masterPrisma = getMasterPrismaClient();
+    
+    // If schemaName is missing, try to get it from the admin record
+    if (!adminSession.schemaName) {
+      console.log('Schema name missing from JWT, attempting to retrieve from admin record...');
+      
+      try {
+        const adminRecord = await masterPrisma.admin.findUnique({
+          where: { id: adminSession.adminId },
+          select: { schemaName: true, isActive: true }
+        });
+        
+        if (!adminRecord || !adminRecord.isActive) {
+          console.log('Admin record not found or inactive:', adminSession.adminId);
+          return NextResponse.json(
+            { success: false, error: 'Admin account not found. Please log in again.' },
+            { status: 401 }
+          );
+        }
+        
+        if (!adminRecord.schemaName) {
+          console.log('Admin record has no schema name:', adminSession.adminId);
+          return NextResponse.json(
+            { success: false, error: 'Admin account configuration incomplete. Please contact support.' },
+            { status: 500 }
+          );
+        }
+        
+        adminSession.schemaName = adminRecord.schemaName;
+        console.log('Retrieved schema name from admin record:', adminRecord.schemaName);
+        
+      } catch (error) {
+        console.error('Failed to retrieve admin record:', error);
+        return NextResponse.json(
+          { success: false, error: 'Authentication verification failed. Please log in again.' },
+          { status: 401 }
+        );
+      }
+    }
+    
+    console.log('Verifying admin exists in master database...');
     
     // Test master database connection first
     try {
-      await masterDb.$queryRaw`SELECT 1`;
+      await masterPrisma.$queryRaw`SELECT 1`;
       console.log('Master database connection verified');
     } catch (masterDbError) {
       console.error('Master database connection failed:', masterDbError);
@@ -168,28 +241,26 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
       );
     }
     
-    // Verify database exists in master database with timeout
-    const databaseRecord = await Promise.race([
-      masterDb.database.findUnique({
+    // Verify admin exists in master database with timeout
+    const adminRecord = await Promise.race([
+      masterPrisma.admin.findUnique({
         where: { 
-          id: adminSession.databaseId,
+          id: adminSession.adminId,
           isActive: true 
         },
         select: {
           id: true,
-          name: true,
+          firstname: true,
+          lastname: true,
+          email: true,
+          role: true,
+          schemaName: true,
           displayName: true,
+          description: true,
+          maxUsers: true,
+          maxStorage: true,
           isActive: true,
-          databaseUrl: true, // Include database URL
-          managedBy: {
-            select: {
-              id: true,
-              firstname: true,
-              lastname: true,
-              email: true,
-              role: true
-            }
-          }
+          createdAt: true
         }
       }),
       new Promise((_, reject) => 
@@ -197,106 +268,74 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
       )
     ]) as any;
 
-    if (!databaseRecord) {
-      console.log('Database record not found in master database:', adminSession.databaseId);
-      return NextResponse.json(
-        { success: false, error: 'Database configuration not found. Please contact support.' },
-        { status: 404 }
-      );
-    }
-
-    console.log('Database record found in master:', {
-      id: databaseRecord.id,
-      name: databaseRecord.name,
-      isActive: databaseRecord.isActive,
-      hasDatabaseUrl: !!databaseRecord.databaseUrl
-    });
-    
-    // Use database URL from database record if not in session
-    const effectiveDatabaseUrl = adminSession.databaseUrl || databaseRecord.databaseUrl;
-    
-    if (!effectiveDatabaseUrl) {
-      console.log('No database URL available');
-      return NextResponse.json(
-        { success: false, error: 'Database configuration incomplete. Please contact support.' },
-        { status: 500 }
-      );
-    }
-    
-    // Get database connection to admin's own database
-    console.log('Connecting to admin database...');
-    let db;
-    try {
-      const connection = await getAdminDatabaseConnection({
-        databaseId: adminSession.databaseId,
-        databaseUrl: effectiveDatabaseUrl
-      });
-      db = connection.db;
-      console.log('Connected to admin database successfully');
-    } catch (connectionError) {
-      console.error('Failed to connect to admin database:', connectionError);
-      return NextResponse.json(
-        { success: false, error: 'Unable to connect to your database. Please try again.' },
-        { status: 503 }
-      );
-    }
-
-    // Test admin database connection
-    try {
-      await db.$queryRaw`SELECT 1`;
-      console.log('Admin database connection verified');
-    } catch (testError) {
-      console.error('Admin database test query failed:', testError);
-      return NextResponse.json(
-        { success: false, error: 'Database connection unstable. Please try again.' },
-        { status: 503 }
-      );
-    }
-
-    // Get admin details from their own database
-    const adminDetails = await db.admin.findUnique({
-      where: { id: adminSession.adminId },
-      select: {
-        id: true,
-        firstname: true,
-        lastname: true,
-        email: true,
-        role: true,
-        isActive: true,
-        createdAt: true
-      }
-    }).catch(err => {
-      console.error('Failed to fetch admin details:', err);
-      return null;
-    });
-
-    console.log('Admin details from own database:', {
-      found: !!adminDetails,
-      isActive: adminDetails?.isActive
-    });
-
-    if (!adminDetails) {
-      console.log('Error: Admin not found in their own database');
+    if (!adminRecord) {
+      console.log('Admin record not found in master database:', adminSession.adminId);
       return NextResponse.json(
         { success: false, error: 'Admin account not found. Please contact support.' },
         { status: 404 }
       );
     }
 
-    if (!adminDetails.isActive) {
-      console.log('Error: Admin account is not active');
+    if (!adminRecord.isActive) {
+      console.log('Admin account is not active');
       return NextResponse.json(
         { success: false, error: 'Admin account is not active. Please contact support.' },
         { status: 403 }
       );
     }
 
+    // Verify schema name matches
+    if (adminRecord.schemaName !== adminSession.schemaName) {
+      console.log('Schema name mismatch:', { 
+        session: adminSession.schemaName, 
+        record: adminRecord.schemaName 
+      });
+      return NextResponse.json(
+        { success: false, error: 'Schema access denied. Please log in again.' },
+        { status: 403 }
+      );
+    }
+
+    console.log('Admin record found in master:', {
+      id: adminRecord.id,
+      email: adminRecord.email,
+      schemaName: adminRecord.schemaName,
+      isActive: adminRecord.isActive
+    });
+    
+    // Get schema-specific database connection
+    console.log(`Connecting to schema: ${adminRecord.schemaName}...`);
+    let schemaPrisma: PrismaClient;
+    try {
+      schemaPrisma = createSchemaPrismaClient(adminRecord.schemaName);
+      await schemaPrisma.$connect();
+      console.log('Connected to schema database successfully');
+    } catch (connectionError) {
+      console.error('Failed to connect to schema database:', connectionError);
+      return NextResponse.json(
+        { success: false, error: 'Unable to connect to your workspace database. Please try again.' },
+        { status: 503 }
+      );
+    }
+
+    // Test schema database connection
+    try {
+      await schemaPrisma.$queryRaw`SELECT 1`;
+      console.log('Schema database connection verified');
+    } catch (testError) {
+      console.error('Schema database test query failed:', testError);
+      return NextResponse.json(
+        { success: false, error: 'Database connection unstable. Please try again.' },
+        { status: 503 }
+      );
+    }
+
     // Get admin user details from beeusers table (if exists)
-    const adminUser = await db.beeusers.findFirst({
+    const adminUser = await schemaPrisma.beeusers.findFirst({
       where: {
-        email: adminDetails.email,
-        databaseId: adminSession.databaseId,
-        isAdmin: true
+        email: adminRecord.email,
+        isAdmin: true,
+        adminId: adminSession.adminId
       },
       select: {
         id: true,
@@ -309,7 +348,7 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
         createdAt: true
       }
     }).catch(err => {
-      console.log('Admin user not found in beeusers table (this is normal):', err.message);
+      console.log('Admin user not found in beeusers table (this is normal for new admins):', err.message);
       return null;
     });
 
@@ -323,40 +362,25 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
     console.log('Fetching dashboard statistics...');
     
     const queries = [
-      // Stats queries - All filtered by databaseId
-      () => db.beeusers.count({
-        where: { databaseId: adminSession.databaseId }
+      // Stats queries - No need for databaseId filtering in schema-per-tenant
+      () => schemaPrisma.beeusers.count(),
+      
+      () => schemaPrisma.batch.count(),
+      
+      () => schemaPrisma.certification.count(),
+      
+      () => schemaPrisma.apiary.count(),
+      
+      () => schemaPrisma.beeusers.count({
+        where: { isConfirmed: true }
       }),
       
-      () => db.batch.count({
-        where: { databaseId: adminSession.databaseId }
+      () => schemaPrisma.beeusers.count({
+        where: { isConfirmed: false }
       }),
       
-      () => db.certification.count({
-        where: { databaseId: adminSession.databaseId }
-      }),
-      
-      () => db.apiary.count({
-        where: { databaseId: adminSession.databaseId }
-      }),
-      
-      () => db.beeusers.count({
-        where: {
-          databaseId: adminSession.databaseId,
-          isConfirmed: true
-        }
-      }),
-      
-      () => db.beeusers.count({
-        where: {
-          databaseId: adminSession.databaseId,
-          isConfirmed: false
-        }
-      }),
-      
-      // Recent activity queries - All filtered by databaseId
-      () => db.beeusers.findMany({
-        where: { databaseId: adminSession.databaseId },
+      // Recent activity queries
+      () => schemaPrisma.beeusers.findMany({
         take: 10,
         orderBy: {
           createdAt: 'desc'
@@ -371,8 +395,7 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
         }
       }),
       
-      () => db.batch.findMany({
-        where: { databaseId: adminSession.databaseId },
+      () => schemaPrisma.batch.findMany({
         take: 10,
         orderBy: {
           createdAt: 'desc'
@@ -392,8 +415,7 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
         }
       }),
       
-      () => db.certification.findMany({
-        where: { databaseId: adminSession.databaseId },
+      () => schemaPrisma.certification.findMany({
         take: 10,
         orderBy: {
           createdAt: 'desc'
@@ -479,16 +501,20 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
       success: true,
       data: {
         admin: {
-          id: adminDetails.id,
-          firstname: adminDetails.firstname,
-          lastname: adminDetails.lastname,
-          email: adminDetails.email,
-          role: adminDetails.role
+          id: adminRecord.id,
+          firstname: adminRecord.firstname,
+          lastname: adminRecord.lastname,
+          email: adminRecord.email,
+          role: adminRecord.role,
+          schemaName: adminRecord.schemaName,
+          displayName: adminRecord.displayName
         },
-        database: {
-          id: databaseRecord.id,
-          name: databaseRecord.name,
-          displayName: databaseRecord.displayName
+        schema: {
+          name: adminRecord.schemaName,
+          displayName: adminRecord.displayName,
+          description: adminRecord.description || undefined,
+          maxUsers: adminRecord.maxUsers,
+          maxStorage: adminRecord.maxStorage
         },
         stats: statsData,
         recentActivity: activityData
@@ -510,13 +536,14 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
     }
 
     console.log('Dashboard API completed successfully in', Date.now() - startTime, 'ms');
-    console.log('Final connection pool stats:', getConnectionPoolStats());
+
+    // Clean up schema connection
+    await schemaPrisma.$disconnect();
 
     return NextResponse.json(responseData);
 
   } catch (error) {
     console.error('Dashboard API error:', error);
-    console.log('Connection pool stats on error:', getConnectionPoolStats());
     
     // Handle specific error types
     if (error instanceof Error) {
@@ -566,13 +593,24 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
         );
       }
       
-      // Handle database not found errors
-      if (error.message.includes('Database configuration not found') ||
+      // Handle schema not found errors
+      if (error.message.includes('schema') && error.message.includes('does not exist')) {
+        return NextResponse.json(
+          { 
+            success: false, 
+            error: 'Workspace schema not found. Please contact support.' 
+          },
+          { status: 404 }
+        );
+      }
+      
+      // Handle admin not found errors
+      if (error.message.includes('Admin account not found') ||
           error.message.includes('Admin not found in target database')) {
         return NextResponse.json(
           { 
             success: false, 
-            error: 'Database configuration error. Please contact support.' 
+            error: 'Admin account not found. Please contact support.' 
           },
           { status: 404 }
         );

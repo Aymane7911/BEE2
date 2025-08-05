@@ -18,11 +18,20 @@ export async function POST(request: NextRequest) {
 
     const token = authHeader.substring(7);
     
-    // Verify JWT token (adjust according to your JWT implementation)
+    // Verify JWT token and extract user info
     let userId: number;
+    let schemaName: string;
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key') as any;
       userId = decoded.userId || decoded.id;
+      schemaName = decoded.schemaName; // Schema name should be included in JWT
+      
+      if (!schemaName) {
+        return NextResponse.json(
+          { error: 'Schema information missing from token' },
+          { status: 401 }
+        );
+      }
     } catch (error) {
       return NextResponse.json(
         { error: 'Invalid authorization token' },
@@ -42,25 +51,24 @@ export async function POST(request: NextRequest) {
       totalJars,
       companyName,
       beekeeperName,
-      location,
-      databaseId
+      location
     } = body;
 
-    // Validate required fields
-    if (!verificationCode || !batchIds || !certificationDate || !totalCertified || !certificationType || !expiryDate || !totalJars || !databaseId) {
+    // Validate required fields (removed databaseId)
+    if (!verificationCode || !batchIds || !certificationDate || !totalCertified || !certificationType || !expiryDate || !totalJars) {
       return NextResponse.json(
         { error: 'Missing required certification data' },
         { status: 400 }
       );
     }
 
-    // Check if verification code already exists - using compound unique constraint
+    // Set the schema for this request
+    await prisma.$executeRawUnsafe(`SET search_path TO "${schemaName}"`);
+
+    // Check if verification code already exists within this schema
     const existingCert = await prisma.certification.findUnique({
-      where: { 
-        verificationCode_databaseId: {
-          verificationCode: verificationCode,
-          databaseId: databaseId
-        }
+      where: {
+        verificationCode: verificationCode
       }
     });
 
@@ -71,7 +79,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create new certification record
+    // Verify user exists in this schema (optional security check)
+    const user = await prisma.beeusers.findUnique({
+      where: { id: userId }
+    });
+
+    if (!user) {
+      return NextResponse.json(
+        { error: 'User not found in this context' },
+        { status: 404 }
+      );
+    }
+
+    // Create new certification record in the tenant schema
     const certification = await prisma.certification.create({
       data: {
         verificationCode,
@@ -84,8 +104,7 @@ export async function POST(request: NextRequest) {
         companyName,
         beekeeperName,
         location,
-        userId: userId,
-        databaseId: databaseId
+        userId: userId
       }
     });
 
@@ -105,6 +124,8 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   } finally {
+    // Reset search_path to default (optional)
+    await prisma.$executeRawUnsafe(`SET search_path TO public`);
     await prisma.$disconnect();
   }
 }

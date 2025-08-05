@@ -1,69 +1,64 @@
-// app/api/user/profile/route.ts
-
 import { NextRequest, NextResponse } from 'next/server';
+import { PrismaClient } from '@prisma/client';
 import { authenticateRequest } from "@/lib/auth";
-import { getPrismaClientByDatabaseId } from "@/lib/prisma-manager";
 import fs from 'fs';
 import path from 'path';
 
 // GET - Get user profile (requires authentication)
 export async function GET(request: NextRequest) {
-  let prisma = null;
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] GET /api/user/profile - Starting request`);
   
+  let prisma: PrismaClient | null = null;
+
   try {
-    const authResult = await authenticateRequest(request);
+    console.log(`🔐 [${requestId}] Authenticating request...`);
     
-    console.log('Raw authResult from auth:', authResult, 'Type:', typeof authResult);
+    const authResult = await authenticateRequest(request);
         
     if (!authResult) {
+      console.log(`❌ [${requestId}] Authentication failed`);
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Extract userId and databaseId from the auth result object
-    const { userId: userIdStr, databaseId } = authResult as { 
-      userId: string; 
-      databaseId: string; 
-    };
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
 
-    // Parse the userId to number
-    const parsedUserId = parseInt(userIdStr, 10);
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
 
-    // Validate the parsed ID
-    if (isNaN(parsedUserId) || parsedUserId <= 0) {
-      console.error('Invalid parsed userId:', parsedUserId, 'from original:', userIdStr);
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
       return NextResponse.json(
         { error: "Invalid user ID" },
         { status: 400 }
       );
     }
 
-    // Validate databaseId
-    if (!databaseId) {
-      return NextResponse.json(
-        { error: "Database ID required" },
-        { status: 400 }
-      );
-    }
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
 
-    // Get the appropriate Prisma client for this database
-    prisma = await getPrismaClientByDatabaseId(databaseId);
-    if (!prisma) {
-      return NextResponse.json(
-        { error: "Database connection failed" },
-        { status: 500 }
-      );
-    }
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
 
-    console.log('Parsed userId for Prisma:', parsedUserId, 'databaseId:', databaseId);
-
-    const user = await prisma.beeusers.findFirst({
-      where: { 
-        id: parsedUserId,
-        databaseId: databaseId
-      },
+    // Fetch user profile
+    const user = await prisma.beeusers.findUnique({
+      where: { id: userIdInt },
       select: {
         id: true,
         firstname: true,
@@ -75,77 +70,97 @@ export async function GET(request: NextRequest) {
         passportId: true,
         passportFile: true,
         isProfileComplete: true,
+        isPremium: true,
+        isAdmin: true,
         createdAt: true,
       },
     });
 
     if (!user) {
+      console.error(`[${requestId}] ▶ User not found:`, userIdInt);
       return NextResponse.json(
         { error: 'User not found' },
         { status: 404 }
       );
     }
 
+    console.log(`✅ [${requestId}] Successfully fetched profile for:`, user.email);
+
     return NextResponse.json(user, { status: 200 });
-  } catch (error) {
-    console.error('Error fetching profile:', error);
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
     return NextResponse.json(
-      { error: 'Failed to fetch profile' },
+      { 
+        error: 'Failed to fetch profile',
+        details: error.message 
+      },
       { status: 500 }
     );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] GET request completed`);
   }
-  // Note: No need to disconnect here as the Prisma manager handles connection pooling
 }
 
 // PUT - Update user profile (requires authentication)
 export async function PUT(request: NextRequest) {
-  let prisma = null;
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] PUT /api/user/profile - Starting request`);
   
+  let prisma: PrismaClient | null = null;
+
   try {
+    console.log(`🔐 [${requestId}] Authenticating request...`);
+    
     const authResult = await authenticateRequest(request);
         
     if (!authResult) {
+      console.log(`❌ [${requestId}] Authentication failed`);
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Extract userId and databaseId from the auth result object
-    const { userId: userIdStr, databaseId } = authResult as { 
-      userId: string; 
-      databaseId: string; 
-    };
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
 
-    // Parse the userId to number
-    const parsedUserId = parseInt(userIdStr, 10);
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
 
-    // Validate the parsed ID
-    if (isNaN(parsedUserId) || parsedUserId <= 0) {
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
       return NextResponse.json(
         { error: "Invalid user ID" },
         { status: 400 }
       );
     }
 
-    if (!databaseId) {
-      return NextResponse.json(
-        { error: "Database ID required" },
-        { status: 400 }
-      );
-    }
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
 
-    // Get the appropriate Prisma client for this database
-    prisma = await getPrismaClientByDatabaseId(databaseId);
-    if (!prisma) {
-      return NextResponse.json(
-        { error: "Database connection failed" },
-        { status: 500 }
-      );
-    }
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
 
     const body = await request.json();
     const { firstname, lastname, phonenumber } = body;
+
+    console.log(`📥 [${requestId}] Request body:`, { firstname, lastname, phonenumber });
 
     // Validate input
     if (!firstname || !lastname) {
@@ -155,30 +170,27 @@ export async function PUT(request: NextRequest) {
       );
     }
 
-    const updatedUser = await prisma.beeusers.updateMany({
-      where: { 
-        id: parsedUserId,
-        databaseId: databaseId 
-      },
-      data: {
-        firstname,
-        lastname,
-        phonenumber,
-      },
+    // Verify user exists first
+    const existingUser = await prisma.beeusers.findUnique({
+      where: { id: userIdInt },
+      select: { id: true, email: true }
     });
 
-    if (updatedUser.count === 0) {
+    if (!existingUser) {
+      console.error(`[${requestId}] ▶ User not found for update:`, userIdInt);
       return NextResponse.json(
         { error: 'User not found or access denied' },
         { status: 404 }
       );
     }
 
-    // Fetch the updated user to return
-    const user = await prisma.beeusers.findFirst({
-      where: { 
-        id: parsedUserId,
-        databaseId: databaseId 
+    // Update user profile
+    const updatedUser = await prisma.beeusers.update({
+      where: { id: userIdInt },
+      data: {
+        firstname,
+        lastname,
+        phonenumber,
       },
       select: {
         id: true,
@@ -190,68 +202,97 @@ export async function PUT(request: NextRequest) {
       },
     });
 
-    return NextResponse.json(user, { status: 200 });
-  } catch (error) {
-    console.error('Error updating profile:', error);
+    console.log(`✅ [${requestId}] Successfully updated profile for:`, updatedUser.email);
+
+    return NextResponse.json(updatedUser, { status: 200 });
+
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
+    
+    // Handle Prisma specific errors
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
+      return NextResponse.json(
+        {
+          error: 'Unique constraint violation',
+          details: 'This information is already in use',
+        },
+        { status: 409 }
+      );
+    }
+
     return NextResponse.json(
-      { error: 'Failed to update profile' },
+      { 
+        error: 'Failed to update profile',
+        details: error.message 
+      },
       { status: 500 }
     );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] PUT request completed`);
   }
-  // Note: No need to disconnect here as the Prisma manager handles connection pooling
 }
 
 // POST - Update passport information with file upload (requires authentication)
 export async function POST(request: NextRequest) {
-  let prisma = null;
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`🚀 [${requestId}] POST /api/user/profile - Starting passport update request`);
   
+  let prisma: PrismaClient | null = null;
+
   try {
+    console.log(`🔐 [${requestId}] Authenticating request...`);
+    
     const authResult = await authenticateRequest(request);
         
     if (!authResult) {
+      console.log(`❌ [${requestId}] Authentication failed`);
       return NextResponse.json(
         { error: "Authentication required" },
         { status: 401 }
       );
     }
 
-    // Extract userId and databaseId from the auth result object
-    const { userId: userIdStr, databaseId } = authResult as { 
-      userId: string; 
-      databaseId: string; 
-    };
+    // Extract userId and schemaName from the auth result
+    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
+    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    
+    console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
 
-    // Parse the userId to number
-    const parsedUserId = parseInt(userIdStr, 10);
+    if (!userId || !schemaName) {
+      return NextResponse.json(
+        { error: "Authentication required" },
+        { status: 401 }
+      );
+    }
 
-    // Validate the parsed ID
-    if (isNaN(parsedUserId) || parsedUserId <= 0) {
+    const userIdInt = parseInt(String(userId));
+    if (isNaN(userIdInt)) {
       return NextResponse.json(
         { error: "Invalid user ID" },
         { status: 400 }
       );
     }
 
-    if (!databaseId) {
-      return NextResponse.json(
-        { error: "Database ID required" },
-        { status: 400 }
-      );
-    }
+    // Initialize Prisma with tenant-specific schema
+    prisma = new PrismaClient({
+      datasources: {
+        db: {
+          url: `${process.env.DATABASE_URL}?schema=${schemaName}`
+        }
+      }
+    });
 
-    // Get the appropriate Prisma client for this database
-    prisma = await getPrismaClientByDatabaseId(databaseId);
-    if (!prisma) {
-      return NextResponse.json(
-        { error: "Database connection failed" },
-        { status: 500 }
-      );
-    }
+    console.log(`[${requestId}] ▶ Using schema:`, schemaName);
 
     // Parse form data
     const formData = await request.formData();
     const passportId = formData.get('passportId') as string;
     const passportScan = formData.get('passportScan') as File | null;
+
+    console.log(`📥 [${requestId}] Passport update - ID:`, passportId, 'File:', passportScan?.name);
 
     // Validate required fields
     if (!passportId?.trim()) {
@@ -265,6 +306,8 @@ export async function POST(request: NextRequest) {
 
     // Handle file upload if present
     if (passportScan && passportScan.size > 0) {
+      console.log(`📁 [${requestId}] Processing file upload:`, passportScan.name, 'Size:', passportScan.size);
+
       // Validate file type
       const allowedTypes = ['image/png', 'image/jpeg', 'application/pdf'];
       if (!allowedTypes.includes(passportScan.type)) {
@@ -287,20 +330,26 @@ export async function POST(request: NextRequest) {
       const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'passports');
       if (!fs.existsSync(uploadDir)) {
         fs.mkdirSync(uploadDir, { recursive: true });
+        console.log(`📁 [${requestId}] Created upload directory:`, uploadDir);
       }
 
       // Get existing user to check for old passport file
-      const existingUser = await prisma.beeusers.findFirst({
-        where: { 
-          id: parsedUserId,
-          databaseId: databaseId 
-        },
-        select: { passportFile: true },
+      const existingUser = await prisma.beeusers.findUnique({
+        where: { id: userIdInt },
+        select: { passportFile: true, email: true },
       });
+
+      if (!existingUser) {
+        console.error(`[${requestId}] ▶ User not found for passport update:`, userIdInt);
+        return NextResponse.json(
+          { error: 'User not found or access denied' },
+          { status: 404 }
+        );
+      }
 
       // Generate unique filename
       const fileExtension = path.extname(passportScan.name);
-      const fileName = `passport_${parsedUserId}_${Date.now()}${fileExtension}`;
+      const fileName = `passport_${userIdInt}_${Date.now()}${fileExtension}`;
       const filePath = path.join(uploadDir, fileName);
 
       // Convert file to buffer and save
@@ -309,74 +358,75 @@ export async function POST(request: NextRequest) {
       fs.writeFileSync(filePath, buffer);
 
       passportFilePath = `/uploads/passports/${fileName}`;
+      console.log(`✅ [${requestId}] File saved successfully:`, passportFilePath);
 
       // Delete old passport file if it exists
-      if (existingUser?.passportFile) {
+      if (existingUser.passportFile) {
         const oldFilePath = path.join(process.cwd(), 'public', existingUser.passportFile);
         if (fs.existsSync(oldFilePath)) {
           try {
             fs.unlinkSync(oldFilePath);
+            console.log(`🗑️ [${requestId}] Deleted old passport file:`, existingUser.passportFile);
           } catch (deleteError) {
-            console.warn('Failed to delete old passport file:', deleteError);
+            console.warn(`⚠️ [${requestId}] Failed to delete old passport file:`, deleteError);
           }
         }
       }
     }
 
     // Update user profile in database
-    const updateResult = await prisma.beeusers.updateMany({
-      where: { 
-        id: parsedUserId,
-        databaseId: databaseId 
-      },
+    const updatedUser = await prisma.beeusers.update({
+      where: { id: userIdInt },
       data: {
         passportId: passportId.trim(),
         ...(passportFilePath && { passportFile: passportFilePath }),
         isProfileComplete: true,
-      },
-    });
-
-    if (updateResult.count === 0) {
-      return NextResponse.json(
-        { error: 'User not found or access denied' },
-        { status: 404 }
-      );
-    }
-
-    // Fetch the updated user to return
-    const updatedUser = await prisma.beeusers.findFirst({
-      where: { 
-        id: parsedUserId,
-        databaseId: databaseId 
       },
       select: {
         id: true,
         passportId: true,
         passportFile: true,
         isProfileComplete: true,
+        email: true,
       },
     });
+
+    console.log(`✅ [${requestId}] Successfully updated passport for:`, updatedUser.email);
 
     return NextResponse.json({
       success: true,
       message: 'Passport information updated successfully',
-      user: updatedUser,
+      user: {
+        id: updatedUser.id,
+        passportId: updatedUser.passportId,
+        passportFile: updatedUser.passportFile,
+        isProfileComplete: updatedUser.isProfileComplete,
+      },
     }, { status: 200 });
 
-  } catch (error) {
-    console.error('Passport update error:', error);
+  } catch (error: any) {
+    console.error(`❌ [${requestId}] FATAL ERROR:`, error);
     
     // Handle Prisma-specific errors
-    if (error instanceof Error) {
-      if (error.message.includes('Unique constraint')) {
-        return NextResponse.json(
-          { 
-            error: 'This passport ID is already in use',
-            details: error.message 
-          },
-          { status: 400 }
-        );
-      }
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
+      return NextResponse.json(
+        { 
+          error: 'This passport ID is already in use',
+          details: 'Unique constraint violation'
+        },
+        { status: 409 }
+      );
+    }
+
+    // Handle file system errors
+    if (error instanceof Error && error.message.includes('ENOENT')) {
+      return NextResponse.json(
+        { 
+          error: 'File system error',
+          details: 'Unable to save uploaded file'
+        },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json(
@@ -386,6 +436,10 @@ export async function POST(request: NextRequest) {
       },
       { status: 500 }
     );
+  } finally {
+    if (prisma) {
+      await prisma.$disconnect();
+    }
+    console.log(`🏁 [${requestId}] POST request completed`);
   }
-  // Note: No need to disconnect here as the Prisma manager handles connection pooling
 }
