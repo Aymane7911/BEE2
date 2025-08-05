@@ -1,16 +1,15 @@
-// app/api/admin/register/route.ts - Schema-per-Tenant Version
-import { PrismaClient } from '@prisma/client';
+// app/api/admin/register/route.ts - Fixed Version
 import bcrypt from 'bcryptjs';
 import { NextRequest, NextResponse } from 'next/server';
 import { Client } from 'pg';
 import { execSync } from 'child_process';
-import { getMasterPrismaClient } from '@/lib/prisma-manager';
+// Updated import to use the working database connection
+import { publicDb, createAdminEntry } from '@/lib/database-connection';
 
 // Test database connection on startup
 async function testPrismaConnection() {
   try {
-    const masterPrisma = getMasterPrismaClient();
-    await masterPrisma.$connect();
+    await publicDb.$connect();
     console.log('✅ Master Prisma connection established successfully');
     return true;
   } catch (error: any) {
@@ -20,7 +19,7 @@ async function testPrismaConnection() {
   }
 }
 
-// Types
+// Types (keep existing types)
 interface AdminRegistrationRequest {
   firstname: string;
   lastname: string;
@@ -92,6 +91,9 @@ function generateSchemaName(firstname: string, lastname: string): string {
   return `${firstname.toLowerCase()}_${lastname.toLowerCase()}_${timestamp}_${random}`;
 }
 
+// Keep your existing functions: createSchema, applySchemaToNewSchema, etc.
+// (I'm not changing these as they seem to work fine)
+
 // Create schema in database
 async function createSchema(schemaName: string): Promise<void> {
   console.log(`🗄️ Creating schema: ${schemaName}`);
@@ -101,7 +103,9 @@ async function createSchema(schemaName: string): Promise<void> {
     port: parseInt(process.env.DB_PORT || '5432'),
     user: process.env.DB_ADMIN_USER || 'postgres',
     password: process.env.DB_ADMIN_PASSWORD,
-    database: process.env.DB_NAME || 'postgres'
+    database: process.env.DB_NAME || 'postgres',
+    // Add SSL configuration to fix the cleanup error
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
   });
 
   try {
@@ -169,20 +173,11 @@ async function createAdminAsUserInSchema(
     role: string;
   }
 ): Promise<any> {
-  // Create connection URL for the specific schema
-  const baseUrl = getMasterDatabaseUrl();
-  const schemaUrl = `${baseUrl}?schema=${schemaName}`;
-
-  const schemaPrisma = new PrismaClient({
-    datasources: {
-      db: {
-        url: schemaUrl,
-      },
-    },
-  });
-
+  // Import the schema connection function
+  const { getSchemaConnection } = await import('@/lib/database-connection');
+  
   try {
-    await schemaPrisma.$connect();
+    const schemaPrisma = await getSchemaConnection(schemaName);
     console.log(`✅ Connected to schema '${schemaName}' for user creation`);
 
     // Create admin as a user in beeusers table within the schema
@@ -206,8 +201,6 @@ async function createAdminAsUserInSchema(
   } catch (error: any) {
     console.error('❌ Failed to create admin as user in schema:', error.message);
     throw new Error(`Failed to create admin as user in schema: ${error.message}`);
-  } finally {
-    await schemaPrisma.$disconnect();
   }
 }
 
@@ -329,25 +322,21 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
     let adminUser: any;
 
     try {
-      const masterPrisma = getMasterPrismaClient();
-
-      // Step 1: Create admin in public schema (for global admin management)
+      // Step 1: Create admin in public schema using the working function
       console.log('👤 Creating admin in public schema...');
-      createdAdmin = await masterPrisma.admin.create({
-        data: {
-          firstname,
-          lastname,
-          email: adminEmail,
-          password: hashedPassword,
-          role,
-          schemaName: schemaName,
-          displayName: schemaConfig.displayName,
-          description: schemaConfig.description,
-          maxUsers: schemaConfig.maxUsers,
-          maxStorage: schemaConfig.maxStorage,
-          isActive: true,
-        }
+      createdAdmin = await createAdminEntry({
+        firstname,
+        lastname,
+        email: adminEmail,
+        password: hashedPassword,
+        role,
+        schemaName: schemaName,
+        displayName: schemaConfig.displayName,
+        description: schemaConfig.description,
+        maxUsers: schemaConfig.maxUsers,
+        maxStorage: schemaConfig.maxStorage,
       });
+      
       console.log(`✅ Admin created in public schema with ID: ${createdAdmin.id}`);
 
       // Step 2: Create schema
@@ -388,7 +377,8 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
           port: parseInt(process.env.DB_PORT || '5432'),
           user: process.env.DB_ADMIN_USER || 'postgres',
           password: process.env.DB_ADMIN_PASSWORD,
-          database: process.env.DB_NAME || 'postgres'
+          database: process.env.DB_NAME || 'postgres',
+          ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
         });
         
         await client.connect();
@@ -402,8 +392,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       // Cleanup: Remove admin from public schema if created
       if (createdAdmin) {
         try {
-          const masterPrisma = getMasterPrismaClient();
-          await masterPrisma.admin.delete({ where: { id: createdAdmin.id } });
+          await publicDb.admin.delete({ where: { id: createdAdmin.id } });
           console.log('✅ Public schema admin cleanup completed');
         } catch (cleanupError) {
           console.error('❌ Public schema admin cleanup failed:', cleanupError);
@@ -444,6 +433,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
   } catch (error: any) {
     console.error('❌ Admin registration error:', error);
 
+    // Keep your existing error handling...
     if (error.message.includes('connection') || error.message.includes('Authentication failed')) {
       return NextResponse.json<AdminRegistrationResponse>(
         { 
@@ -491,6 +481,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
   }
 }
 
+// Keep your existing HTTP method handlers...
 export async function GET(): Promise<NextResponse<AdminRegistrationResponse>> {
   return NextResponse.json(
     { success: false, error: 'Method not allowed' },
