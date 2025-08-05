@@ -7,7 +7,7 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const token = searchParams.get('token');
-    const databaseId = searchParams.get('db'); // Optional database ID parameter
+    const schemaName = searchParams.get('schema'); // Optional schema parameter
 
     if (!token) {
       return NextResponse.json(
@@ -16,40 +16,52 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    console.log(`Confirming email with token: ${token}, database: ${databaseId || 'any'}`);
+    console.log(`Confirming email with token: ${token}, schema: ${schemaName || 'default'}`);
 
-    // Find user by confirmation token
-    // If database ID is provided, search within that database context
-    const whereClause: any = { 
-      confirmationToken: token,
-      isConfirmed: false // Only find unconfirmed users
-    };
-
-    // If database ID is provided, add it to the search criteria
-    if (databaseId) {
-      whereClause.databaseId = databaseId;
+    // If schema is provided, switch to that schema context
+    let targetPrisma = prisma;
+    if (schemaName) {
+      // Create a new Prisma instance with the specific schema
+      targetPrisma = new PrismaClient({
+        datasources: {
+          db: {
+            url: process.env.DATABASE_URL + `?schema=${schemaName}`
+          }
+        }
+      });
     }
 
-    const user = await prisma.beeusers.findFirst({
-      where: whereClause
+    // Find user by confirmation token
+    const user = await targetPrisma.beeusers.findFirst({
+      where: { 
+        confirmationToken: token,
+        isConfirmed: false // Only find unconfirmed users
+      }
     });
 
     if (!user) {
-      console.log(`User not found with token: ${token} in database: ${databaseId || 'any'}`);
+      console.log(`User not found with token: ${token} in schema: ${schemaName || 'default'}`);
       
       // Check if user exists but is already confirmed
-      const confirmedUser = await prisma.beeusers.findFirst({
+      const confirmedUser = await targetPrisma.beeusers.findFirst({
         where: {
-          confirmationToken: token,
-          ...(databaseId && { databaseId })
+          confirmationToken: token
         }
       });
 
       if (confirmedUser && confirmedUser.isConfirmed) {
-        // Get database info separately
-        const database = await prisma.database.findUnique({
-          where: { id: confirmedUser.databaseId }
-        });
+        // Get admin info if this user has adminId
+        let adminInfo = null;
+        if (confirmedUser.adminId) {
+          try {
+            adminInfo = await prisma.admin.findUnique({
+              where: { id: confirmedUser.adminId },
+              select: { displayName: true, schemaName: true }
+            });
+          } catch (error) {
+            console.warn('Could not fetch admin info:', error);
+          }
+        }
 
         return NextResponse.json(
           { 
@@ -60,8 +72,8 @@ export async function GET(request: NextRequest) {
               email: confirmedUser.email,
               firstname: confirmedUser.firstname,
               lastname: confirmedUser.lastname,
-              database: database?.displayName || 'Unknown',
-              databaseId: confirmedUser.databaseId
+              organization: adminInfo?.displayName || 'Default',
+              schemaName: adminInfo?.schemaName || schemaName || 'public'
             }
           },
           { status: 200 }
@@ -71,27 +83,35 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         { 
           error: 'Invalid or expired confirmation token',
-          details: databaseId ? `Token not found in database ${databaseId}` : 'Token not found in any database'
+          details: schemaName ? `Token not found in schema ${schemaName}` : 'Token not found'
         },
         { status: 400 }
       );
     }
 
-    // Get database info separately
-    const database = await prisma.database.findUnique({
-      where: { id: user.databaseId }
-    });
-
-    console.log(`Found user: ${user.email} in database: ${database?.displayName || 'Unknown'}`);
+    console.log(`Found user: ${user.email} in schema: ${schemaName || 'default'}`);
 
     // Confirm the user
-    const updatedUser = await prisma.beeusers.update({
+    const updatedUser = await targetPrisma.beeusers.update({
       where: { id: user.id },
       data: {
         isConfirmed: true,
         confirmationToken: null, // Clear the token after confirmation
       }
     });
+
+    // Get admin info if this user has adminId
+    let adminInfo = null;
+    if (updatedUser.adminId) {
+      try {
+        adminInfo = await prisma.admin.findUnique({
+          where: { id: updatedUser.adminId },
+          select: { displayName: true, schemaName: true }
+        });
+      } catch (error) {
+        console.warn('Could not fetch admin info:', error);
+      }
+    }
 
     console.log(`Email confirmed successfully for user: ${updatedUser.email}`);
 
@@ -104,8 +124,8 @@ export async function GET(request: NextRequest) {
           email: updatedUser.email,
           firstname: updatedUser.firstname,
           lastname: updatedUser.lastname,
-          database: database?.displayName || 'Unknown',
-          databaseId: updatedUser.databaseId
+          organization: adminInfo?.displayName || 'Default',
+          schemaName: adminInfo?.schemaName || schemaName || 'public'
         }
       },
       { status: 200 }
@@ -128,7 +148,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { token, databaseId } = body;
+    const { token, schemaName } = body;
 
     if (!token) {
       return NextResponse.json(
@@ -137,34 +157,46 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Use the same logic as GET request
-    const whereClause: any = { 
-      confirmationToken: token,
-      isConfirmed: false
-    };
-
-    if (databaseId) {
-      whereClause.databaseId = databaseId;
+    // If schema is provided, switch to that schema context
+    let targetPrisma = prisma;
+    if (schemaName) {
+      targetPrisma = new PrismaClient({
+        datasources: {
+          db: {
+            url: process.env.DATABASE_URL + `?schema=${schemaName}`
+          }
+        }
+      });
     }
 
-    const user = await prisma.beeusers.findFirst({
-      where: whereClause
+    const user = await targetPrisma.beeusers.findFirst({
+      where: { 
+        confirmationToken: token,
+        isConfirmed: false
+      }
     });
 
     if (!user) {
       // Check if already confirmed
-      const confirmedUser = await prisma.beeusers.findFirst({
+      const confirmedUser = await targetPrisma.beeusers.findFirst({
         where: {
-          confirmationToken: token,
-          ...(databaseId && { databaseId })
+          confirmationToken: token
         }
       });
 
       if (confirmedUser && confirmedUser.isConfirmed) {
-        // Get database info separately
-        const database = await prisma.database.findUnique({
-          where: { id: confirmedUser.databaseId }
-        });
+        // Get admin info if this user has adminId
+        let adminInfo = null;
+        if (confirmedUser.adminId) {
+          try {
+            adminInfo = await prisma.admin.findUnique({
+              where: { id: confirmedUser.adminId },
+              select: { displayName: true, schemaName: true }
+            });
+          } catch (error) {
+            console.warn('Could not fetch admin info:', error);
+          }
+        }
 
         return NextResponse.json(
           { 
@@ -175,8 +207,8 @@ export async function POST(request: NextRequest) {
               email: confirmedUser.email,
               firstname: confirmedUser.firstname,
               lastname: confirmedUser.lastname,
-              database: database?.displayName || 'Unknown',
-              databaseId: confirmedUser.databaseId
+              organization: adminInfo?.displayName || 'Default',
+              schemaName: adminInfo?.schemaName || schemaName || 'public'
             }
           },
           { status: 200 }
@@ -186,14 +218,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { 
           error: 'Invalid or expired confirmation token',
-          details: databaseId ? `Token not found in database ${databaseId}` : 'Token not found in any database'
+          details: schemaName ? `Token not found in schema ${schemaName}` : 'Token not found'
         },
         { status: 400 }
       );
     }
 
     // Confirm the user
-    const updatedUser = await prisma.beeusers.update({
+    const updatedUser = await targetPrisma.beeusers.update({
       where: { id: user.id },
       data: {
         isConfirmed: true,
@@ -201,10 +233,18 @@ export async function POST(request: NextRequest) {
       }
     });
 
-    // Get database info separately
-    const database = await prisma.database.findUnique({
-      where: { id: updatedUser.databaseId }
-    });
+    // Get admin info if this user has adminId
+    let adminInfo = null;
+    if (updatedUser.adminId) {
+      try {
+        adminInfo = await prisma.admin.findUnique({
+          where: { id: updatedUser.adminId },
+          select: { displayName: true, schemaName: true }
+        });
+      } catch (error) {
+        console.warn('Could not fetch admin info:', error);
+      }
+    }
 
     return NextResponse.json(
       { 
@@ -215,8 +255,8 @@ export async function POST(request: NextRequest) {
           email: updatedUser.email,
           firstname: updatedUser.firstname,
           lastname: updatedUser.lastname,
-          database: database?.displayName || 'Unknown',
-          databaseId: updatedUser.databaseId
+          organization: adminInfo?.displayName || 'Default',
+          schemaName: adminInfo?.schemaName || schemaName || 'public'
         }
       },
       { status: 200 }
