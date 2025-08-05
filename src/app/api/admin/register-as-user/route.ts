@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getAdminFromRequest } from '@/lib/admin-auth';
-import { getDatabaseFromSession } from '@/lib/database-connection';
+import { getAdminFromRequest, withTenantSchema } from '@/lib/admin-auth';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
 
 export async function POST(request: NextRequest) {
   console.log('=== Register as User API Started ===');
@@ -17,8 +19,7 @@ export async function POST(request: NextRequest) {
         adminId: adminSession.adminId,
         email: adminSession.email,
         role: adminSession.role,
-        databaseId: adminSession.databaseId,
-        databaseUrl: adminSession.databaseUrl ? 'Present' : 'Missing'
+        schemaName: adminSession.schemaName
       });
     } catch (authError) {
       console.log('❌ Authentication failed:', authError);
@@ -28,38 +29,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Get database connection with detailed logging
-    console.log('Step 2: Getting database connection...');
-    console.log('Database connection info:', {
-      databaseId: adminSession.databaseId,
-      hasUrl: !!adminSession.databaseUrl
-    });
-
-    let dbConnection;
-    try {
-      dbConnection = await getDatabaseFromSession(adminSession.databaseId, adminSession.databaseUrl);
-      console.log('✅ Database connection established successfully');
-      console.log('Database info:', {
-        id: dbConnection.databaseInfo.id,
-        name: dbConnection.databaseInfo.name,
-        displayName: dbConnection.databaseInfo.displayName
-      });
-    } catch (dbError) {
-      console.log('❌ Database connection failed:', dbError);
-      return NextResponse.json({
-        error: 'Database connection failed',
-        details: dbError instanceof Error ? dbError.message : 'Unknown error'
-      }, { status: 500 });
-    }
-
-    const { db } = dbConnection;
-
-    // 3. Validate admin exists in the connected database
-    console.log('Step 3: Validating admin exists in target database...');
+    // 2. Get admin details from public schema
+    console.log('Step 2: Getting admin details from public schema...');
     
     let adminDetails;
     try {
-      adminDetails = await db.admin.findUnique({
+      adminDetails = await prisma.admin.findUnique({
         where: { id: adminSession.adminId },
         select: {
           id: true,
@@ -67,25 +42,18 @@ export async function POST(request: NextRequest) {
           lastname: true,
           email: true,
           role: true,
-          isActive: true
+          isActive: true,
+          schemaName: true,
+          displayName: true
         }
       });
 
       if (!adminDetails) {
-        console.log('❌ Admin not found in target database');
-        console.log('Looking for admin ID:', adminSession.adminId);
-        
-        // List all admins in this database for debugging
-        const allAdmins = await db.admin.findMany({
-          select: { id: true, email: true, isActive: true }
-        });
-        console.log('Available admins in database:', allAdmins);
-        
+        console.log('❌ Admin not found in public schema');
         return NextResponse.json({
-          error: 'Admin not found in target database',
+          error: 'Admin not found in public schema',
           details: {
-            searchedForAdminId: adminSession.adminId,
-            availableAdmins: allAdmins
+            searchedForAdminId: adminSession.adminId
           }
         }, { status: 404 });
       }
@@ -103,6 +71,7 @@ export async function POST(request: NextRequest) {
         id: adminDetails.id,
         email: adminDetails.email,
         role: adminDetails.role,
+        schemaName: adminDetails.schemaName,
         isActive: adminDetails.isActive
       });
 
@@ -114,23 +83,24 @@ export async function POST(request: NextRequest) {
       }, { status: 500 });
     }
 
-    // 4. Check if admin is already registered as user in this database
-    console.log('Step 4: Checking if admin is already registered as user...');
+    // 3. Check if admin is already registered as user in tenant schema
+    console.log('Step 3: Checking if admin is already registered as user in tenant schema...');
     
     try {
-      const existingUser = await db.beeusers.findFirst({
-        where: {
-          email: adminDetails.email,
-          databaseId: adminSession.databaseId
-        },
-        select: {
-          id: true,
-          email: true,
-          isAdmin: true,
-          adminId: true,
-          role: true,
-          createdAt: true
-        }
+      const existingUser = await withTenantSchema(adminSession.schemaName, async () => {
+        return await prisma.beeusers.findFirst({
+          where: {
+            email: adminDetails.email,
+          },
+          select: {
+            id: true,
+            email: true,
+            isAdmin: true,
+            adminId: true,
+            role: true,
+            createdAt: true
+          }
+        });
       });
 
       if (existingUser) {
@@ -153,77 +123,14 @@ export async function POST(request: NextRequest) {
       }, { status: 500 });
     }
 
-    // 5. Verify the database record exists in the current database
-    console.log('Step 5: Verifying database record exists for foreign key...');
-    
-    try {
-      const databaseRecord = await db.database.findUnique({
-        where: { id: adminSession.databaseId },
-        select: {
-          id: true,
-          name: true,
-          displayName: true,
-          isActive: true
-        }
-      });
-
-      if (!databaseRecord) {
-        console.log('❌ Database record not found in current connection');
-        console.log('Expected database ID:', adminSession.databaseId);
-        
-        // List all available databases for debugging
-        const availableDatabases = await db.database.findMany({
-          select: { 
-            id: true, 
-            name: true, 
-            displayName: true, 
-            isActive: true 
-          }
-        });
-        
-        console.log('Available databases in current connection:');
-        availableDatabases.forEach((dbRecord, index) => {
-          console.log(`  ${index + 1}. ID: ${dbRecord.id}`);
-          console.log(`     Name: ${dbRecord.name}`);
-          console.log(`     Display: ${dbRecord.displayName}`);
-          console.log(`     Active: ${dbRecord.isActive}`);
-          console.log('     ---');
-        });
-
-        return NextResponse.json({
-          error: 'Database foreign key validation failed',
-          details: {
-            expectedDatabaseId: adminSession.databaseId,
-            message: 'The database ID from your session does not exist in the target database',
-            availableDatabases: availableDatabases.map(db => ({
-              id: db.id,
-              name: db.name,
-              displayName: db.displayName
-            }))
-          }
-        }, { status: 400 });
-      }
-
-      console.log('✅ Database record validated successfully');
-      console.log('Database record details:', databaseRecord);
-
-    } catch (dbValidationError) {
-      console.log('❌ Error during database validation:', dbValidationError);
-      return NextResponse.json({
-        error: 'Database validation error',
-        details: dbValidationError instanceof Error ? dbValidationError.message : 'Unknown error'
-      }, { status: 500 });
-    }
-
-    // 6. Create user record
-    console.log('Step 6: Creating new user record...');
+    // 4. Create user record in tenant schema
+    console.log('Step 4: Creating new user record in tenant schema...');
     
     const userData = {
       firstname: adminDetails.firstname,
       lastname: adminDetails.lastname,
       email: adminDetails.email,
       password: 'admin_placeholder', // You might want to handle this differently
-      databaseId: adminSession.databaseId,
       isAdmin: true,
       adminId: adminDetails.id,
       role: 'admin',
@@ -237,29 +144,31 @@ export async function POST(request: NextRequest) {
     });
 
     try {
-      const newUser = await db.beeusers.create({
-        data: userData,
-        select: {
-          id: true,
-          firstname: true,
-          lastname: true,
-          email: true,
-          role: true,
-          isAdmin: true,
-          adminId: true,
-          databaseId: true,
-          createdAt: true,
-          isConfirmed: true,
-          isProfileComplete: true
-        }
+      const newUser = await withTenantSchema(adminSession.schemaName, async () => {
+        return await prisma.beeusers.create({
+          data: userData,
+          select: {
+            id: true,
+            firstname: true,
+            lastname: true,
+            email: true,
+            role: true,
+            isAdmin: true,
+            adminId: true,
+            createdAt: true,
+            isConfirmed: true,
+            isProfileComplete: true
+          }
+        });
       });
 
-      console.log('✅ User created successfully');
+      console.log('✅ User created successfully in tenant schema');
       console.log('New user details:', newUser);
 
       return NextResponse.json({
         message: 'Admin registered as user successfully',
-        user: newUser
+        user: newUser,
+        schema: adminSession.schemaName
       }, { status: 201 });
 
     } catch (userCreationError) {
@@ -286,6 +195,20 @@ export async function POST(request: NextRequest) {
             console.log('Constraint name:', prismaError.meta.constraint);
           }
         }
+
+        // Specific handling for unique constraint errors
+        if (prismaError.code === 'P2002') {
+          console.log('Unique constraint violation details:');
+          if (prismaError.meta && prismaError.meta.target) {
+            console.log('Fields causing conflict:', prismaError.meta.target);
+          }
+          
+          return NextResponse.json({
+            error: 'User with this email already exists in this schema',
+            details: 'A user with this email address is already registered in this tenant.',
+            errorCode: prismaError.code
+          }, { status: 409 });
+        }
       }
 
       return NextResponse.json({
@@ -293,6 +216,7 @@ export async function POST(request: NextRequest) {
         details: userCreationError instanceof Error ? userCreationError.message : 'Unknown error',
         errorCode: (userCreationError as any)?.code,
         errorMeta: (userCreationError as any)?.meta,
+        schema: adminSession.schemaName,
         userData: {
           ...userData,
           password: '[REDACTED]'
