@@ -1,9 +1,6 @@
 'use client';
 
-// Force dynamic rendering so useSearchParams works at runtime
-export const dynamic = 'force-dynamic';
-
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 
@@ -20,7 +17,7 @@ interface ConfirmationResult {
   };
 }
 
-export default function ConfirmEmailPage() {
+function ConfirmEmailContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const [result, setResult] = useState<ConfirmationResult | null>(null);
@@ -171,5 +168,28 @@ export default function ConfirmEmailPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+// Loading fallback component
+function LoadingFallback() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+      <div className="max-w-md w-full mx-auto p-6">
+        <div className="bg-white rounded-lg shadow-lg p-8 text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading...</h2>
+          <p className="text-gray-600">Please wait...</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function ConfirmEmailPage() {
+  return (
+    <Suspense fallback={<LoadingFallback />}>
+      <ConfirmEmailContent />
+    </Suspense>
   );
 }
