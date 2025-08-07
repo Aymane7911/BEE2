@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
-import { Layers, Database, Tag, Package, RefreshCw, Menu, X, Home, Settings, Users, Activity, HelpCircle, Wallet, PlusCircle, MapPin, CheckCircle, Trash2, Globe, FileText, AlertCircle, Sparkles, LogOut, Plus, Star } from 'lucide-react';
+import { Layers, Database, Tag, Package, RefreshCw, Menu, X, Home, Settings, Users, Activity, HelpCircle, Wallet, PlusCircle, MapPin, CheckCircle, Trash2, Globe, FileText, AlertCircle, Sparkles, LogOut, Plus, Star, LayoutDashboard } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { signOut } from 'next-auth/react';
 
@@ -187,6 +187,11 @@ const Header = ({
     fetchTokenStats();
   };
 
+  // Dashboard navigation function
+  const handleDashboardClick = () => {
+    router.push('/admin/dashboard');
+  };
+
   return (
     <header className="relative bg-white/80 backdrop-blur-xl p-6 rounded-3xl shadow-2xl border border-white/20 text-black overflow-hidden">
       <div className="absolute inset-0 bg-gradient-to-r from-yellow-500/5 via-transparent to-amber-500/5"></div>
@@ -270,8 +275,6 @@ const Header = ({
                   <RefreshCw className={`h-4 w-4 text-gray-400 hover:text-yellow-400 transition-all duration-300 ${isLoadingTokens ? 'animate-spin' : ''}`} />
                 </button>
               </div>
-              
-             
             </div>
             
             <button
@@ -292,6 +295,31 @@ const Header = ({
               <span className="relative z-10">Buy</span>
             </button>
           </div>
+
+          {/* Dashboard Button */}
+          <button
+            onClick={handleDashboardClick}
+            className="group relative overflow-hidden px-6 py-3 rounded-xl font-semibold shadow-2xl
+                       transform transition-all duration-500 flex items-center
+                       bg-gradient-to-r from-purple-600 to-violet-500 text-white
+                       hover:from-purple-500 hover:to-violet-400 
+                       hover:scale-105 hover:shadow-purple-500/30 hover:-translate-y-2
+                       active:scale-95 active:translate-y-0
+                       border border-purple-400/20"
+          >
+            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent 
+                           transform -skew-x-12 -translate-x-full 
+                           group-hover:translate-x-full transition-transform duration-700"></div>
+            <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-purple-400 to-violet-400 
+                           opacity-0 group-hover:opacity-100 transition-opacity duration-300 blur-sm"></div>
+            <LayoutDashboard className="h-5 w-5 mr-3 relative z-10 transition-all duration-300 
+                                      group-hover:rotate-12 group-hover:scale-110" />
+            <span className="relative z-10 transition-all duration-300 group-hover:tracking-wider">
+              Dashboard
+            </span>
+            <Sparkles className="w-4 h-4 ml-2 relative z-10 opacity-0 transition-all duration-300 
+                              group-hover:opacity-100 group-hover:rotate-180" />
+          </button>
 
           {/* Create Batch Button */}
           <button

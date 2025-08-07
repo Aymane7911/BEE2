@@ -19,7 +19,7 @@ model Admin {
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
   lastLoginAt DateTime? @map("last_login_at")
-  
+  confirmation  AdminConfirmation?
   // Schema information for this admin
   schemaName  String   @unique @map("schema_name") // e.g., "admin_123" or "acmecorp"
   displayName String?  @map("display_name") // Friendly name for the schema
@@ -45,6 +45,21 @@ model AdminSession {
   admin        Admin    @relation(fields: [adminId], references: [id], onDelete: Cascade)
 
   @@map("admin_sessions")
+}
+
+
+// Admin email confirmation tokens (stored in public schema)
+model AdminConfirmation {
+  id           String   @id @default(cuid())
+  adminId      Int      @unique @map("admin_id")
+  token        String   @unique @map("token")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  confirmedAt  DateTime? @map("confirmed_at")
+  
+  admin        Admin    @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@map("admin_confirmations")
 }
 
 // =============================================================================

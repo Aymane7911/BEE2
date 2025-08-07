@@ -13,11 +13,14 @@ import {
   AlertCircle,
   UserPlus,
   LogIn,
+  LogOut,
   TrendingUp,
   Eye,
   Sparkles,
   Shield
 } from 'lucide-react';
+import { useRouter } from 'next/navigation'; // Add router import
+import { signOut } from 'next-auth/react'; // Add NextAuth import if you're using it
 
 // Updated interfaces to match your new schema-per-tenant system
 interface AdminData {
@@ -212,6 +215,9 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [registeringUser, setRegisteringUser] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const router = useRouter();
+
 
   const fetchDashboardData = async () => {
     try {
@@ -227,7 +233,7 @@ export default function AdminDashboard() {
             data.error?.includes('Invalid authentication token') ||
             data.error?.includes('outdated authentication format')) {
           // Redirect to login for authentication errors
-          window.location.href = '/admin/login';
+          window.location.href = '/login';
           return;
         }
         throw new Error(data.error || 'Failed to fetch dashboard data');
@@ -290,17 +296,84 @@ export default function AdminDashboard() {
     }
   };
 
+ const performLogout = async () => {
+    // Clear the ACTUAL localStorage keys (based on your debug output)
+    const keysToRemove = [
+      'token',           // ← This is the main token
+      'authtoken',       // ← This is another token 
+      'authToken',       // Keep this in case it exists sometimes
+      'refreshToken',    // Keep this in case it exists sometimes
+      'adminToken',      // Admin specific token
+      'admin-token',     // Admin specific token (alternative naming)
+      'user',
+      'adminData',       // Admin user data
+      'tokenBalance',    // This might be auth-related
+      'isProfileComplete', // This might be user-related
+      'nextauth.message', // NextAuth related
+      'honeycertify_apiaries', // This might contain user data
+    ];
+
+    // Remove all auth keys
+    keysToRemove.forEach(key => {
+      localStorage.removeItem(key);
+      console.log(`✅ Cleared localStorage key: ${key}`);
+    });
+
+    // Clear session storage completely
+    sessionStorage.clear();
+    console.log('✅ SessionStorage cleared');
+
+    // Make API call to auth logout endpoint
+    try {
+      console.log('🔄 Calling auth logout API...');
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include'
+      });
+      console.log('✅ Auth logout API called');
+    } catch (error) {
+      console.warn('💥 Backend logout failed:', error);
+    }
+  };
+
   const handleLogout = async () => {
     try {
-      // Clear admin token cookie by calling logout endpoint
-      await fetch('/api/admin/logout', { method: 'POST' });
+      setLoggingOut(true);
+      console.log('🚪 Starting logout process...');
+      
+      // Log current cookies before logout
+      console.log('🍪 Cookies before logout:', document.cookie);
+      
+      // Clear client-side auth data and call logout API
+      await performLogout();
+      
+      // Also sign out from NextAuth if using OAuth
+      try {
+        await signOut({ redirect: false });
+        console.log('✅ NextAuth signOut completed');
+      } catch (signOutError) {
+        console.warn('⚠️ NextAuth signOut failed:', signOutError);
+      }
+      
+      console.log('✅ Logout completed, redirecting to login...');
+      
+      // Check cookies after logout
+      console.log('🍪 Cookies after logout:', document.cookie);
       
       // Redirect to login page
-      window.location.href = '/admin/login';
+      router.push('/login');
+      
+      // Force a hard refresh to ensure all state is cleared
+      setTimeout(() => {
+        window.location.href = '/login';
+      }, 100);
+      
     } catch (error) {
-      console.error('Logout error:', error);
-      // Force redirect even if logout API fails
-      window.location.href = '/admin/login';
+      console.error('💥 Logout error:', error);
+      // Still redirect even if there's an error
+      router.push('/login');
+    } finally {
+      setLoggingOut(false);
     }
   };
 
@@ -348,7 +421,7 @@ export default function AdminDashboard() {
               onClick={handleLogout}
               className="w-full bg-gradient-to-r from-gray-500 to-gray-600 text-white py-3 px-6 rounded-xl hover:from-gray-600 hover:to-gray-700 transition-all duration-300 flex items-center justify-center space-x-2 shadow-lg hover:shadow-xl"
             >
-              <LogIn className="w-5 h-5" />
+              <LogOut className="w-5 h-5" />
               <span>Back to Login</span>
             </button>
           </div>
@@ -455,10 +528,15 @@ export default function AdminDashboard() {
                 {/* Logout Button */}
                 <button
                   onClick={handleLogout}
-                  className="bg-gradient-to-r from-gray-500 to-gray-600 text-white py-3 px-4 rounded-xl hover:from-gray-600 hover:to-gray-700 transition-all duration-300 flex items-center justify-center shadow-lg hover:shadow-xl transform hover:-translate-y-1"
+                  disabled={loggingOut}
+                  className="bg-gradient-to-r from-red-500 to-red-600 text-white py-3 px-4 rounded-xl hover:from-red-600 hover:to-red-700 disabled:opacity-50 transition-all duration-300 flex items-center justify-center shadow-lg hover:shadow-xl transform hover:-translate-y-1"
                   title="Logout"
                 >
-                  <LogIn className="w-5 h-5 rotate-180" />
+                  {loggingOut ? (
+                    <RefreshCw className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <LogOut className="w-5 h-5" />
+                  )}
                 </button>
               </div>
             </div>
@@ -651,27 +729,29 @@ export default function AdminDashboard() {
         <div className="flex justify-center">
           <button
             onClick={fetchDashboardData}
-            className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-4 px-8 rounded-2xl hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 flex items-center space-x-3 shadow-xl hover:shadow-2xl transform hover:-translate-y-1 font-bold text-lg"
+            className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-4 px-8 rounded-2xl hover:from-indigo-600 hover:to-purple-700 transition-all duration-300 flex items-center space-x-3 shadow-lg hover:shadow-xl transform hover:-translate-y-1"
           >
-            <RefreshCw className="w-6 h-6" />
-            <span>Refresh Dashboard</span>
-            <Sparkles className="w-5 h-5" />
+            <Activity className="w-6 h-6" />
+            <span className="font-medium">Refresh Dashboard</span>
           </button>
         </div>
       </div>
 
-      {/* Custom CSS for scrollbar */}
+      {/* Custom Scrollbar Styles */}
       <style jsx>{`
         .custom-scrollbar::-webkit-scrollbar {
           width: 6px;
         }
-        
         .custom-scrollbar::-webkit-scrollbar-track {
           background: #f1f5f9;
           border-radius: 10px;
         }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+          background: linear-gradient(to bottom, #3b82f6, #8b5cf6);
+          border-radius: 10px;
+        }
         .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: linear-gradient(45deg, #2563eb, #7c3aed);
+          background: linear-gradient(to bottom, #2563eb, #7c3aed);
         }
       `}</style>
     </div>

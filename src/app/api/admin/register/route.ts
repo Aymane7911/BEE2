@@ -1,8 +1,10 @@
-// app/api/admin/register/route.ts - Fixed Version
+// app/api/admin/register/route.ts - With Gmail Email Confirmation
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { Client } from 'pg';
 import { execSync } from 'child_process';
+import nodemailer from 'nodemailer';
 // Updated import to use the working database connection
 import { publicDb, createAdminEntry } from '@/lib/database-connection';
 
@@ -19,7 +21,124 @@ async function testPrismaConnection() {
   }
 }
 
-// Types (keep existing types)
+// Email configuration - Updated to use Gmail
+const createEmailTransporter = () => {
+  // For production, use services like SendGrid, AWS SES, etc.
+  if (process.env.EMAIL_SERVICE === 'sendgrid') {
+    return nodemailer.createTransport({
+      service: 'SendGrid',
+      auth: {
+        user: 'apikey',
+        pass: process.env.SENDGRID_API_KEY,
+      },
+    });
+  } else if (process.env.EMAIL_SERVICE === 'smtp') {
+    return nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT || '587'),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+  } else {
+    // Default to Gmail using your credentials
+    console.log('📧 Using Gmail for email delivery');
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER, // aymanafcat@gmail.com
+        pass: process.env.EMAIL_PASSWORD, // dgbs euvj wzue qipb (your app password)
+      },
+    });
+  }
+};
+
+// Send confirmation email - Updated with your email as sender
+async function sendConfirmationEmail(email: string, token: string, adminName: string) {
+  try {
+    const transporter = createEmailTransporter();
+    const confirmationUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/admin/confirm-email?token=${token}`;
+    
+    const mailOptions = {
+      from: process.env.EMAIL_USER || 'aymanafcat@gmail.com', // Use your Gmail as sender
+      to: email,
+      subject: 'Confirm Your Admin Account',
+      html: `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Confirm Your Admin Account</title>
+          <style>
+            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            .header { background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+            .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px; }
+            .button { display: inline-block; background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 20px 0; }
+            .footer { text-align: center; margin-top: 30px; color: #666; font-size: 14px; }
+            .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 20px 0; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>🛡️ Admin Account Confirmation</h1>
+              <p>Welcome to the Admin Portal</p>
+            </div>
+            <div class="content">
+              <h2>Hello ${adminName}!</h2>
+              <p>Thank you for registering as an administrator. To complete your account setup and activate your admin privileges, please confirm your email address.</p>
+              
+              <div style="text-align: center;">
+                <a href="${confirmationUrl}" class="button">Confirm Admin Account</a>
+              </div>
+              
+              <div class="warning">
+                <strong>⚠️ Important:</strong> This confirmation link will expire in 24 hours for security reasons.
+              </div>
+              
+              <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
+              <p style="word-break: break-all; background: #e9ecef; padding: 10px; border-radius: 4px;">
+                ${confirmationUrl}
+              </p>
+              
+              <hr style="margin: 30px 0; border: none; border-top: 1px solid #dee2e6;">
+              
+              <h3>What happens after confirmation?</h3>
+              <ul>
+                <li>✅ Your admin account will be activated</li>
+                <li>🗄️ Your dedicated database schema will be initialized</li>
+                <li>👥 You'll be able to manage users and system settings</li>
+                <li>📊 Access to the admin dashboard will be granted</li>
+              </ul>
+              
+              <p>If you didn't request this admin account, please ignore this email or contact our support team.</p>
+            </div>
+            <div class="footer">
+              <p>© 2024 Admin Portal. All rights reserved.</p>
+              <p>This is an automated message, please do not reply to this email.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log('✅ Confirmation email sent successfully:', info.messageId);
+    console.log('📧 Email sent from:', process.env.EMAIL_USER);
+    console.log('📧 Email sent to:', email);
+    
+    return true;
+  } catch (error) {
+    console.error('❌ Failed to send confirmation email:', error);
+    throw new Error('Failed to send confirmation email');
+  }
+}
+
+// Types
 interface AdminRegistrationRequest {
   firstname: string;
   lastname: string;
@@ -41,6 +160,7 @@ interface AdminRegistrationResponse {
   success: boolean;
   message?: string;
   error?: string;
+  requiresConfirmation?: boolean;
   data?: {
     admin: {
       id: number;
@@ -50,8 +170,9 @@ interface AdminRegistrationResponse {
       role: string;
       schemaName: string;
       createdAt: Date;
+      isConfirmed: boolean;
     };
-    adminUser: {
+    adminUser?: {
       id: number;
       firstname: string;
       lastname: string;
@@ -91,9 +212,6 @@ function generateSchemaName(firstname: string, lastname: string): string {
   return `${firstname.toLowerCase()}_${lastname.toLowerCase()}_${timestamp}_${random}`;
 }
 
-// Keep your existing functions: createSchema, applySchemaToNewSchema, etc.
-// (I'm not changing these as they seem to work fine)
-
 // Create schema in database
 async function createSchema(schemaName: string): Promise<void> {
   console.log(`🗄️ Creating schema: ${schemaName}`);
@@ -104,7 +222,6 @@ async function createSchema(schemaName: string): Promise<void> {
     user: process.env.DB_ADMIN_USER || 'postgres',
     password: process.env.DB_ADMIN_PASSWORD,
     database: process.env.DB_NAME || 'postgres',
-    // Add SSL configuration to fix the cleanup error
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
   });
 
@@ -139,7 +256,6 @@ async function applySchemaToNewSchema(schemaName: string): Promise<void> {
   try {
     console.log(`📋 Applying schema migrations to: ${schemaName}`);
     
-    // Create a temporary DATABASE_URL for the specific schema
     const baseUrl = getMasterDatabaseUrl();
     const schemaUrl = `${baseUrl}?schema=${schemaName}`;
     
@@ -173,25 +289,23 @@ async function createAdminAsUserInSchema(
     role: string;
   }
 ): Promise<any> {
-  // Import the schema connection function
   const { getSchemaConnection } = await import('@/lib/database-connection');
   
   try {
     const schemaPrisma = await getSchemaConnection(schemaName);
     console.log(`✅ Connected to schema '${schemaName}' for user creation`);
 
-    // Create admin as a user in beeusers table within the schema
     const adminUser = await schemaPrisma.beeusers.create({
       data: {
         firstname: adminData.firstname,
         lastname: adminData.lastname,
         email: adminData.email,
         password: adminData.password,
-        role: 'admin', // Set role as admin in beeusers
-        isAdmin: true, // Mark as admin
-        adminId: adminId, // Reference to admin table (in public schema)
-        isConfirmed: true, // Auto-confirm admin users
-        isProfileComplete: true, // Mark profile as complete
+        role: 'admin',
+        isAdmin: true,
+        adminId: adminId,
+        isConfirmed: false, // Will be confirmed when admin email is confirmed
+        isProfileComplete: true,
       }
     });
 
@@ -219,8 +333,6 @@ async function initializeNewSchema(
   try {
     console.log(`🔧 Initializing schema '${schemaName}' with admin user...`);
     
-    // Create admin as a user in beeusers table within the schema
-    console.log('👥 Creating admin as user in beeusers table within schema...');
     const adminUser = await createAdminAsUserInSchema(
       schemaName,
       adminId,
@@ -261,7 +373,7 @@ function validateRequest(data: Partial<AdminRegistrationRequest>): string | null
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<AdminRegistrationResponse>> {
-  console.log('🚀 Starting admin registration process (Schema-per-Tenant)...');
+  console.log('🚀 Starting admin registration process with email confirmation...');
   
   // Test database connection first
   const connectionTest = await testPrismaConnection();
@@ -300,6 +412,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
 
     // Prepare admin email
     const adminEmail = email || `${phonenumber}@phone.local`;
+    const hasRealEmail = !!email; // Only send confirmation for real emails
 
     // Generate unique schema name
     const schemaName = schema?.name || generateSchemaName(firstname, lastname);
@@ -320,9 +433,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
 
     let createdAdmin: any;
     let adminUser: any;
+    let confirmationRecord: any;
 
     try {
-      // Step 1: Create admin in public schema using the working function
+      // Generate confirmation token for email users
+      const confirmationToken = hasRealEmail ? crypto.randomUUID() : null;
+      const tokenExpiry = hasRealEmail ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null; // 24 hours
+
+      // Step 1: Create admin in public schema (WITHOUT confirmation fields)
       console.log('👤 Creating admin in public schema...');
       createdAdmin = await createAdminEntry({
         firstname,
@@ -338,6 +456,19 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       });
       
       console.log(`✅ Admin created in public schema with ID: ${createdAdmin.id}`);
+
+      // Step 1.5: Create confirmation record if email confirmation is needed
+      if (hasRealEmail && confirmationToken && tokenExpiry) {
+        console.log('🔐 Creating confirmation token...');
+        confirmationRecord = await publicDb.adminConfirmation.create({
+          data: {
+            adminId: createdAdmin.id,
+            token: confirmationToken,
+            expiresAt: tokenExpiry,
+          }
+        });
+        console.log('✅ Confirmation token created');
+      }
 
       // Step 2: Create schema
       console.log('🗄️ Creating schema...');
@@ -366,12 +497,39 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       adminUser = initResult.adminUser;
       console.log('✅ New schema initialized successfully');
 
+      // Step 5: Send confirmation email if real email provided
+      if (hasRealEmail && confirmationToken) {
+        console.log('📧 Sending confirmation email...');
+        try {
+          await sendConfirmationEmail(
+            adminEmail, 
+            confirmationToken, 
+            `${firstname} ${lastname}`
+          );
+          console.log('✅ Confirmation email sent successfully');
+        } catch (emailError) {
+          console.error('❌ Failed to send confirmation email:', emailError);
+          // Don't fail the entire registration, but log the error
+          // You might want to set a flag to resend later
+        }
+      }
+
     } catch (error: any) {
       console.error('❌ Registration process failed:', error.message);
       
-      // Cleanup: Try to remove the schema if it was created
+      // Enhanced cleanup logic
       try {
-        console.log('🧹 Attempting to cleanup created schema...');
+        console.log('🧹 Attempting to cleanup created resources...');
+        
+        // Cleanup confirmation record if it exists
+        if (confirmationRecord) {
+          await publicDb.adminConfirmation.delete({
+            where: { id: confirmationRecord.id }
+          });
+          console.log('✅ Confirmation record cleanup completed');
+        }
+        
+        // Cleanup schema
         const client = new Client({
           host: process.env.DB_HOST || 'localhost',
           port: parseInt(process.env.DB_PORT || '5432'),
@@ -385,18 +543,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
         await client.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
         await client.end();
         console.log('✅ Schema cleanup completed');
-      } catch (cleanupError) {
-        console.error('❌ Schema cleanup failed:', cleanupError);
-      }
-
-      // Cleanup: Remove admin from public schema if created
-      if (createdAdmin) {
-        try {
+        
+        // Cleanup admin record (this will cascade delete the confirmation record if it exists)
+        if (createdAdmin) {
           await publicDb.admin.delete({ where: { id: createdAdmin.id } });
-          console.log('✅ Public schema admin cleanup completed');
-        } catch (cleanupError) {
-          console.error('❌ Public schema admin cleanup failed:', cleanupError);
+          console.log('✅ Admin record cleanup completed');
         }
+        
+      } catch (cleanupError) {
+        console.error('❌ Cleanup failed:', cleanupError);
       }
       
       throw error;
@@ -404,36 +559,62 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
 
     console.log('🎉 Admin registration completed successfully!');
 
-    return NextResponse.json<AdminRegistrationResponse>({
-      success: true,
-      message: `Admin account and schema '${schemaName}' created successfully. Admin registered in public schema and added as user in their own schema.`,
-      data: {
-        admin: {
-          id: createdAdmin.id,
-          firstname: createdAdmin.firstname,
-          lastname: createdAdmin.lastname,
-          email: createdAdmin.email,
-          role: createdAdmin.role,
-          schemaName: createdAdmin.schemaName,
-          createdAt: createdAdmin.createdAt
-        },
-        adminUser: {
-          id: adminUser.id,
-          firstname: adminUser.firstname,
-          lastname: adminUser.lastname,
-          email: adminUser.email,
-          role: adminUser.role,
-          isAdmin: adminUser.isAdmin,
-          adminId: adminUser.adminId,
-          createdAt: adminUser.createdAt
+    // Check if admin needs confirmation by looking at the confirmation record
+    const needsConfirmation = hasRealEmail && confirmationRecord && !confirmationRecord.confirmedAt;
+
+    // Return different responses based on confirmation requirement
+    if (needsConfirmation) {
+      return NextResponse.json<AdminRegistrationResponse>({
+        success: true,
+        requiresConfirmation: true,
+        message: `Registration successful! Please check your email at ${adminEmail} for confirmation instructions. Your admin account will be activated after email confirmation.`,
+        data: {
+          admin: {
+            id: createdAdmin.id,
+            firstname: createdAdmin.firstname,
+            lastname: createdAdmin.lastname,
+            email: createdAdmin.email,
+            role: createdAdmin.role,
+            schemaName: createdAdmin.schemaName,
+            createdAt: createdAdmin.createdAt,
+            isConfirmed: false // Not confirmed yet
+          }
         }
-      }
-    }, { status: 201 });
+      }, { status: 201 });
+    } else {
+      // Phone registration or no email confirmation required
+      return NextResponse.json<AdminRegistrationResponse>({
+        success: true,
+        requiresConfirmation: false,
+        message: `Admin account and schema '${schemaName}' created successfully. You can now access the admin dashboard.`,
+        data: {
+          admin: {
+            id: createdAdmin.id,
+            firstname: createdAdmin.firstname,
+            lastname: createdAdmin.lastname,
+            email: createdAdmin.email,
+            role: createdAdmin.role,
+            schemaName: createdAdmin.schemaName,
+            createdAt: createdAdmin.createdAt,
+            isConfirmed: true // Auto-confirmed for phone registrations
+          },
+          adminUser: {
+            id: adminUser.id,
+            firstname: adminUser.firstname,
+            lastname: adminUser.lastname,
+            email: adminUser.email,
+            role: adminUser.role,
+            isAdmin: adminUser.isAdmin,
+            adminId: adminUser.adminId,
+            createdAt: adminUser.createdAt
+          }
+        }
+      }, { status: 201 });
+    }
 
   } catch (error: any) {
     console.error('❌ Admin registration error:', error);
 
-    // Keep your existing error handling...
     if (error.message.includes('connection') || error.message.includes('Authentication failed')) {
       return NextResponse.json<AdminRegistrationResponse>(
         { 
@@ -481,7 +662,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
   }
 }
 
-// Keep your existing HTTP method handlers...
 export async function GET(): Promise<NextResponse<AdminRegistrationResponse>> {
   return NextResponse.json(
     { success: false, error: 'Method not allowed' },

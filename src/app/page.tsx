@@ -173,7 +173,7 @@ export default function Hero() {
                 Login
               </motion.button>
               <motion.button
-                onClick={() => router.push('/selection')}
+                onClick={() => router.push('/register')}
                 className="bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-black font-semibold py-2 px-6 rounded-full transition-all duration-300 shadow-lg"
                 whileHover={{ scale: 1.05, boxShadow: "0 0 25px rgba(234, 179, 8, 0.6)" }}
                 whileTap={{ scale: 0.95 }}
