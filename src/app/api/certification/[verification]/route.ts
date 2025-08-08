@@ -2,12 +2,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PrismaClient } from '@prisma/client';
 
-const prisma = new PrismaClient();
+const createPrismaClient = () => new PrismaClient();
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ verification: string }> }
 ) {
+  const prisma = createPrismaClient();
+  
   try {
     const { verification } = await params;
     const verificationCode = verification;
@@ -21,89 +23,139 @@ export async function GET(
 
     console.log('Looking for verification code:', verificationCode);
 
-    // Use findFirst instead of findUnique to avoid compound unique constraint issue
-    const certification = await prisma.certification.findFirst({
-      where: {
-        verificationCode: verificationCode
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstname: true,
-            lastname: true,
-            email: true,
-            phonenumber: true,
-            isProfileComplete: true,
-          }
-        }
+    // Since this is a public verification endpoint, we need to search across all tenant schemas
+    // First, get all admin schemas
+    const admins = await prisma.admin.findMany({
+      select: {
+        schemaName: true,
+        displayName: true
       }
     });
 
-    // Option 2: If you need to use findUnique with compound key, you'll need both fields
-    // Uncomment this and comment out the findFirst above if you have the databaseId
-    /*
-    const certification = await prisma.certification.findUnique({
-      where: {
-        verificationCode_databaseId: {
-          verificationCode: verificationCode,
-          databaseId: "your_database_id_here" // You'll need to get this value
-        }
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            firstname: true,
-            lastname: true,
-            email: true,
-            phonenumber: true,
-            isProfileComplete: true,
-          }
-        }
-      }
-    });
-    */
+    console.log('Available schemas:', admins.map(a => a.schemaName));
 
-    console.log('Found certification:', certification);
+    let certification = null;
+    let user = null;
+    let foundInSchema = null;
+
+    // Search in each tenant schema
+    for (const admin of admins) {
+      const { schemaName } = admin;
+      
+      try {
+        console.log(`Searching in schema: ${schemaName}`);
+        
+        // Set search path to the tenant schema
+        await prisma.$executeRawUnsafe(`SET search_path TO "${schemaName}"`);
+
+        // Try to find the certification in this schema
+        const certResult = await prisma.$queryRawUnsafe(
+          `SELECT 
+            id,
+            verification_code,
+            batch_ids,
+            certification_date,
+            total_certified,
+            certification_type,
+            expiry_date,
+            total_jars,
+            company_name,
+            beekeeper_name,
+            location,
+            user_id,
+            created_at,
+            updated_at
+          FROM "${schemaName}".certifications 
+          WHERE verification_code = $1 
+          LIMIT 1`,
+          verificationCode
+        ) as any[];
+
+        if (certResult && certResult.length > 0) {
+          const rawCert = certResult[0];
+          console.log(`Found certification in schema: ${schemaName}`, rawCert);
+          
+          certification = {
+            id: rawCert.id,
+            verificationCode: rawCert.verification_code,
+            batchIds: rawCert.batch_ids,
+            certificationDate: rawCert.certification_date,
+            totalCertified: rawCert.total_certified,
+            certificationType: rawCert.certification_type,
+            expiryDate: rawCert.expiry_date,
+            totalJars: rawCert.total_jars,
+            companyName: rawCert.company_name,
+            beekeeperName: rawCert.beekeeper_name,
+            location: rawCert.location,
+            userId: rawCert.user_id,
+            createdAt: rawCert.created_at,
+            updatedAt: rawCert.updated_at
+          };
+          
+          foundInSchema = schemaName;
+
+          // Get user information from the same schema
+          try {
+            const userResult = await prisma.$queryRawUnsafe(
+              `SELECT 
+                id, firstname, lastname, email, phonenumber, "isProfileComplete"
+              FROM "${schemaName}".beeusers 
+              WHERE id = $1 
+              LIMIT 1`,
+              rawCert.user_id
+            ) as any[];
+
+            if (userResult && userResult.length > 0) {
+              user = userResult[0];
+              console.log(`Found user in schema: ${schemaName}`, user);
+            }
+          } catch (userError) {
+            console.log(`Error fetching user from schema ${schemaName}:`, userError);
+          }
+
+          break; // Found it, stop searching
+        }
+      } catch (error) {
+        console.log(`Error searching in schema ${schemaName}:`, error);
+        continue; // Try next schema
+      }
+    }
+
+    // Reset search path to public
+    await prisma.$executeRawUnsafe(`SET search_path TO public`);
 
     if (!certification) {
+      console.log('No certification found in any schema');
       return NextResponse.json(
         { error: 'Certification not found' },
         { status: 404 }
       );
     }
 
-    // Construct beekeeper name from user profile
+    console.log(`Certification found in schema: ${foundInSchema}`);
+
+    // Construct beekeeper name
     let beekeeperName = null;
     
-    if (certification.user) {
-      const { firstname, lastname } = certification.user;
-      
-      // Fixed: Better null/undefined checking and string validation
-      const validFirstname = firstname && typeof firstname === 'string' && firstname.trim() !== '';
-      const validLastname = lastname && typeof lastname === 'string' && lastname.trim() !== '';
+    if (user) {
+      const { firstname, lastname } = user;
+      const validFirstname = firstname && typeof firstname === 'string' && firstname.trim() !== '' && !firstname.includes('undefined');
+      const validLastname = lastname && typeof lastname === 'string' && lastname.trim() !== '' && !lastname.includes('undefined');
       
       if (validFirstname || validLastname) {
-        // Only trim if the value exists and is a string
         const parts = [];
         if (validFirstname) parts.push(firstname.trim());
         if (validLastname) parts.push(lastname.trim());
         beekeeperName = parts.join(' ');
       }
       
-      // Debug logging
-      console.log('User firstname:', firstname);
-      console.log('User lastname:', lastname);
-      console.log('Valid firstname:', validFirstname);
-      console.log('Valid lastname:', validLastname);
-      console.log('Constructed beekeeperName:', beekeeperName);
+      console.log('User info:', { firstname, lastname });
+      console.log('Constructed beekeeperName from user:', beekeeperName);
     }
 
-    // Fallback to stored beekeeperName if user profile doesn't have complete info
+    // Fallback to stored beekeeperName
     if (!beekeeperName && certification.beekeeperName) {
       const storedName = certification.beekeeperName.trim();
-      // Only use if doesn't contain placeholder values
       if (storedName && 
           !storedName.includes('undefined') && 
           !storedName.includes('null') &&
@@ -112,15 +164,12 @@ export async function GET(
         beekeeperName = storedName;
       }
       
-      // Debug logging
-      console.log('Stored beekeeperName:', certification.beekeeperName);
-      console.log('Using stored name:', beekeeperName);
+      console.log('Using stored beekeeperName:', beekeeperName);
     }
 
-    // If still no name, provide a fallback
     if (!beekeeperName) {
       beekeeperName = 'Name not available';
-      console.log('No valid beekeeper name found, using fallback');
+      console.log('Using fallback beekeeper name');
     }
 
     // Transform the data to match the expected format
@@ -128,21 +177,31 @@ export async function GET(
       id: certification.id,
       verificationCode: certification.verificationCode,
       batchIds: certification.batchIds,
-      certificationDate: certification.certificationDate.toISOString().split('T')[0],
+      certificationDate: certification.certificationDate instanceof Date 
+        ? certification.certificationDate.toISOString().split('T')[0]
+        : certification.certificationDate,
       totalCertified: parseFloat(certification.totalCertified.toString()),
       certificationType: certification.certificationType,
-      expiryDate: certification.expiryDate.toISOString().split('T')[0],
+      expiryDate: certification.expiryDate instanceof Date
+        ? certification.expiryDate.toISOString().split('T')[0] 
+        : certification.expiryDate,
       totalJars: certification.totalJars,
       companyName: certification.companyName,
       beekeeperName: beekeeperName,
       location: certification.location,
-      createdAt: certification.createdAt.toISOString(),
-      // Additional beekeeper info if available
-      beekeeperInfo: certification.user ? {
-        email: certification.user.email,
-        phone: certification.user.phonenumber,
-        profileComplete: certification.user.isProfileComplete,
+      createdAt: certification.createdAt instanceof Date
+        ? certification.createdAt.toISOString()
+        : certification.createdAt,
+      beekeeperInfo: user ? {
+        email: user.email,
+        phone: user.phonenumber,
+        profileComplete: user.isProfileComplete,
       } : null,
+      // Additional debug info (remove in production)
+      _debug: {
+        foundInSchema: foundInSchema,
+        userFound: !!user
+      }
     };
 
     console.log('Sending response:', response);
@@ -152,17 +211,22 @@ export async function GET(
   } catch (error) {
     console.error('Error fetching certification:', error);
     
-    // More detailed error logging
     if (error instanceof Error) {
       console.error('Error message:', error.message);
       console.error('Error stack:', error.stack);
     }
     
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { error: 'Internal server error', details: error instanceof Error ? error.message : 'Unknown error' },
       { status: 500 }
     );
   } finally {
-    await prisma.$disconnect();
+    // Clean up connection
+    try {
+      await prisma.$executeRawUnsafe(`SET search_path TO public`);
+      await prisma.$disconnect();
+    } catch (error) {
+      console.error('Error during cleanup:', error);
+    }
   }
 }

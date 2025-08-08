@@ -402,22 +402,59 @@ const [certificationData, setCertificationData] = useState<any>(null);const [qrC
  // Function to generate QR code using the qrcode library
  const generateQRCode = async (data: any) => {
   try {
-    // Create URL parameters from certification data
-    const urlParams = new URLSearchParams({
-      batchIds: data.batchIds.join(','),
-      certificationDate: data.certificationDate,
-      totalCertified: data.totalCertified,
-      certificationType: data.certificationType,
-      expiryDate: data.expiryDate,
-      verification: data.verification,
-      totalJars: data.totalJars
+    // DEFINITIVE BASE URL RESOLUTION
+    const getBaseUrl = (): string => {
+      // 1. Check client-side first (most reliable)
+      if (typeof window !== 'undefined') {
+        return `${window.location.protocol}//${window.location.host}`;
+      }
+      
+      // 2. Server-side environment variable fallback chain
+      const envVars = [
+        process.env.NEXT_PUBLIC_SITE_URL,
+        process.env.NEXTAUTH_URL,
+        process.env.REACT_APP_BASE_URL,
+        process.env.RENDER_EXTERNAL_URL,
+        process.env.VERCEL_URL
+      ];
+      
+      for (const envVar of envVars) {
+        if (envVar && 
+            envVar !== 'undefined' && 
+            envVar.trim() !== '' && 
+            envVar.startsWith('http')) {
+          return envVar.replace(/\/$/, ''); // Remove trailing slash
+        }
+      }
+      
+      // 3. Final fallback based on NODE_ENV
+      if (process.env.NODE_ENV === 'production') {
+        // Use your production URL
+        return 'https://bee-9ipt.onrender.com';
+      } else {
+        return 'http://localhost:3000';
+      }
+    };
+    
+    const baseUrl = getBaseUrl();
+    console.log('🌐 Base URL resolved to:', baseUrl);
+    console.log('📱 Environment:', process.env.NODE_ENV);
+    console.log('🔧 Available env vars:', {
+      NEXT_PUBLIC_SITE_URL: process.env.NEXT_PUBLIC_SITE_URL,
+      NEXTAUTH_URL: process.env.NEXTAUTH_URL,
+      REACT_APP_BASE_URL: process.env.REACT_APP_BASE_URL,
+      RENDER_EXTERNAL_URL: process.env.RENDER_EXTERNAL_URL
     });
     
     // Create the certification verification URL
-    // Replace 'your-domain.com' with your actual domain
-const certificationUrl = `${process.env.REACT_APP_BASE_URL}/cert/${data.verification}`;    
-    // Alternative shorter URL approach using verification code only:
-    // const certificationUrl = `https://your-domain.com/cert/${data.verification}`;
+    const certificationUrl = `${baseUrl}/cert/${data.verification}`;
+    console.log('📋 Generated certification URL:', certificationUrl);
+    
+    // Validate the URL before generating QR
+    if (certificationUrl.includes('undefined')) {
+      console.error('❌ URL still contains undefined:', certificationUrl);
+      throw new Error('Failed to resolve valid base URL');
+    }
     
     const qrDataUrl = await QRCode.toDataURL(certificationUrl, {
       width: 200,
@@ -429,24 +466,57 @@ const certificationUrl = `${process.env.REACT_APP_BASE_URL}/cert/${data.verifica
       errorCorrectionLevel: 'M'
     });
     
+    console.log('✅ QR code generated successfully');
     return qrDataUrl;
+    
   } catch (error) {
-    console.error('Error generating QR code:', error);
-    return '';
+    console.error('❌ Error generating QR code:', error);
+    
+    // Emergency fallback QR with hardcoded URL
+    try {
+      const emergencyUrl = `https://bee-9ipt.onrender.com/cert/${data.verification}`;
+      console.log('🚨 Using emergency fallback URL:', emergencyUrl);
+      
+      const fallbackQR = await QRCode.toDataURL(emergencyUrl, {
+        width: 200,
+        margin: 2,
+        color: {
+          dark: '#000000',
+          light: '#FFFFFF'
+        },
+        errorCorrectionLevel: 'M'
+      });
+      
+      return fallbackQR;
+    } catch (fallbackError) {
+      console.error('❌ Emergency fallback also failed:', fallbackError);
+      return '';
+    }
   }
 };
 
-  // Function to download QR code
-  const downloadQRCode = () => {
-    if (!qrCodeDataUrl) return;
-    
+// Function to download QR code
+const downloadQRCode = () => {
+  if (!qrCodeDataUrl) {
+    console.warn('⚠️ No QR code data available for download');
+    return;
+  }
+  
+  try {
     const link = document.createElement('a');
     link.download = `honey-certification-${Date.now()}.png`;
     link.href = qrCodeDataUrl;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  };
+    console.log('✅ QR code download initiated');
+  } catch (error) {
+    console.error('❌ Error downloading QR code:', error);
+  }
+};
+
+  // Function to download QR code
+  
 
 
   const [isUploading, setIsUploading] = useState(false);

@@ -1,3 +1,4 @@
+
 // app/cert/[verification]/page.tsx
 import { notFound } from 'next/navigation';
 import { Suspense } from 'react';

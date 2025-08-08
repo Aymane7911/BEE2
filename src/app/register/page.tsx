@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import Web3 from 'web3';
+import { contractABI, contractAddress } from '../../contractsinfo';
 
 export default function AdminRegistrationPage() {
   const [formData, setFormData] = useState({
@@ -62,7 +64,7 @@ export default function AdminRegistrationPage() {
       setIsLoading(false);
     }
   };
-
+  
   const handleSubmit = async () => {
     setError('');
     setSuccess('');

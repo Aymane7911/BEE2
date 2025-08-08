@@ -53,7 +53,7 @@ function ConfirmEmailContent() {
       
       // If successful, redirect to login after 3 seconds
       if (data.success) {
-        setTimeout(() => router.push('/admin/login'), 3000);
+        setTimeout(() => router.push('/login'), 3000);
       }
     } catch (error) {
       setResult({
@@ -109,7 +109,7 @@ function ConfirmEmailContent() {
 
               <div className="space-y-3">
                 <p className="text-sm text-gray-500 mb-4">🔄 Redirecting to login page in 3 seconds...</p>
-                <Link href="/admin/login" className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors">
+                <Link href="/login" className="inline-flex items-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors">
                   Go to Login
                   <svg className="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
@@ -146,11 +146,11 @@ function ConfirmEmailContent() {
                 </ul>
                 
                 <div className="flex flex-col sm:flex-row gap-3">
-                  <Link href="/admin/register" className="inline-flex items-center justify-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors">
+                  <Link href="/register" className="inline-flex items-center justify-center px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors">
                     Register Again
                   </Link>
                   
-                  <Link href="/admin/login" className="inline-flex items-center justify-center px-4 py-2 border border-gray-300 hover:border-gray-400 text-gray-700 font-medium rounded-lg transition-colors">
+                  <Link href="/login" className="inline-flex items-center justify-center px-4 py-2 border border-gray-300 hover:border-gray-400 text-gray-700 font-medium rounded-lg transition-colors">
                     Try Login
                   </Link>
                 </div>
