@@ -260,21 +260,23 @@ const Header = ({
               </div>
               
               <div className="flex items-center">
-                <p className="text-2xl font-bold bg-gradient-to-r from-yellow-400 to-yellow-200
-                                        bg-clip-text text-transparent transition-all duration-300
-                                        group-hover:from-yellow-300 group-hover:to-white">
-                  {isLoadingTokens ? '...' : actualTokenBalance}
-                </p>
-                
-                <button
-                  onClick={handleRefreshTokens}
-                  disabled={isLoadingTokens}
-                  className="ml-3 p-1 rounded-full hover:bg-gray-700/50 transition-all duration-300 disabled:opacity-50"
-                  title="Refresh token balance"
-                >
-                  <RefreshCw className={`h-4 w-4 text-gray-400 hover:text-yellow-400 transition-all duration-300 ${isLoadingTokens ? 'animate-spin' : ''}`} />
-                </button>
-              </div>
+  <p className="text-2xl font-bold bg-gradient-to-r from-yellow-400 to-yellow-200
+                bg-clip-text text-transparent transition-all duration-300
+                group-hover:from-yellow-300 group-hover:to-white
+                min-w-[3rem] text-center leading-none"
+     style={{ fontSize: '24px', fontWeight: '700' }}>
+    {isLoadingTokens ? '...' : actualTokenBalance}
+  </p>
+  
+  <button
+    onClick={handleRefreshTokens}
+    disabled={isLoadingTokens}
+    className="ml-3 p-1 rounded-full hover:bg-gray-700/50 transition-all duration-300 disabled:opacity-50"
+    title="Refresh token balance"
+  >
+    <RefreshCw className={`h-4 w-4 text-gray-400 hover:text-yellow-400 transition-all duration-300 ${isLoadingTokens ? 'animate-spin' : ''}`} />
+  </button>
+</div>
             </div>
             
             <button
