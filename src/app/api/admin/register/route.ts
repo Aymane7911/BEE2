@@ -1,11 +1,10 @@
-// app/api/admin/register/route.ts - With Gmail Email Confirmation
+// app/api/admin/register/route.ts - Updated without admin code requirement
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { Client } from 'pg';
 import { execSync } from 'child_process';
 import nodemailer from 'nodemailer';
-// Updated import to use the working database connection
 import { publicDb, createAdminEntry } from '@/lib/database-connection';
 
 // Test database connection on startup
@@ -21,9 +20,13 @@ async function testPrismaConnection() {
   }
 }
 
-// Email configuration - Updated to use Gmail
+// Helper function to generate OTP
+function generateOTP(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+// Email configuration
 const createEmailTransporter = () => {
-  // For production, use services like SendGrid, AWS SES, etc.
   if (process.env.EMAIL_SERVICE === 'sendgrid') {
     return nodemailer.createTransport({
       service: 'SendGrid',
@@ -43,26 +46,25 @@ const createEmailTransporter = () => {
       },
     });
   } else {
-    // Default to Gmail using your credentials
     console.log('📧 Using Gmail for email delivery');
     return nodemailer.createTransport({
       service: 'gmail',
       auth: {
-        user: process.env.EMAIL_USER, // aymanafcat@gmail.com
-        pass: process.env.EMAIL_PASSWORD, // dgbs euvj wzue qipb (your app password)
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASSWORD,
       },
     });
   }
 };
 
-// Send confirmation email - Updated with your email as sender
+// Send confirmation email
 async function sendConfirmationEmail(email: string, token: string, adminName: string) {
   try {
     const transporter = createEmailTransporter();
     const confirmationUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/admin/confirm-email?token=${token}`;
     
     const mailOptions = {
-      from: process.env.EMAIL_USER || 'aymanafcat@gmail.com', // Use your Gmail as sender
+      from: process.env.EMAIL_USER || 'aymanafcat@gmail.com',
       to: email,
       subject: 'Confirm Your Admin Account',
       html: `
@@ -128,8 +130,6 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
 
     const info = await transporter.sendMail(mailOptions);
     console.log('✅ Confirmation email sent successfully:', info.messageId);
-    console.log('📧 Email sent from:', process.env.EMAIL_USER);
-    console.log('📧 Email sent to:', email);
     
     return true;
   } catch (error) {
@@ -145,9 +145,9 @@ interface AdminRegistrationRequest {
   email?: string;
   phonenumber?: string;
   password: string;
-  adminCode: string;
   role: 'admin' | 'super_admin';
-  schema?: {
+  phoneVerified?: boolean;
+  database?: {
     name?: string;
     displayName?: string;
     description?: string;
@@ -161,6 +161,7 @@ interface AdminRegistrationResponse {
   message?: string;
   error?: string;
   requiresConfirmation?: boolean;
+  registrationMethod?: 'email' | 'phone';
   data?: {
     admin: {
       id: number;
@@ -185,13 +186,7 @@ interface AdminRegistrationResponse {
   };
 }
 
-// Admin authorization codes
-const ADMIN_CODES: Record<string, string> = {
-  super_admin: process.env.SUPER_ADMIN_CODE || 'super_admin_2024_secure',
-  admin: process.env.ADMIN_CODE || 'admin_2024_secure'
-};
-
-// Get master database URL with fallback
+// Get master database URL
 function getMasterDatabaseUrl(): string {
   const masterUrl = process.env.MASTER_DATABASE_URL || 
                    process.env.DATABASE_URL || 
@@ -227,9 +222,7 @@ async function createSchema(schemaName: string): Promise<void> {
 
   try {
     await client.connect();
-    console.log('✅ Connected to database for schema creation');
     
-    // Check if schema already exists
     const existingSchemaResult = await client.query(
       'SELECT 1 FROM information_schema.schemata WHERE schema_name = $1',
       [schemaName]
@@ -239,7 +232,6 @@ async function createSchema(schemaName: string): Promise<void> {
       throw new Error(`Schema '${schemaName}' already exists`);
     }
     
-    // Create the schema
     await client.query(`CREATE SCHEMA "${schemaName}"`);
     console.log(`✅ Schema '${schemaName}' created successfully`);
     
@@ -287,7 +279,8 @@ async function createAdminAsUserInSchema(
     email: string;
     password: string;
     role: string;
-  }
+  },
+  isPhoneRegistration: boolean = false
 ): Promise<any> {
   const { getSchemaConnection } = await import('@/lib/database-connection');
   
@@ -304,7 +297,8 @@ async function createAdminAsUserInSchema(
         role: 'admin',
         isAdmin: true,
         adminId: adminId,
-        isConfirmed: false, // Will be confirmed when admin email is confirmed
+        // For phone registrations, auto-confirm since phone is already verified
+        isConfirmed: isPhoneRegistration,
         isProfileComplete: true,
       }
     });
@@ -328,7 +322,8 @@ async function initializeNewSchema(
     email: string;
     password: string;
     role: string;
-  }
+  },
+  isPhoneRegistration: boolean = false
 ): Promise<{ adminUser: any }> {
   try {
     console.log(`🔧 Initializing schema '${schemaName}' with admin user...`);
@@ -336,7 +331,8 @@ async function initializeNewSchema(
     const adminUser = await createAdminAsUserInSchema(
       schemaName,
       adminId,
-      adminData
+      adminData,
+      isPhoneRegistration
     );
     
     console.log(`✅ Schema '${schemaName}' initialized successfully with admin user`);
@@ -348,13 +344,25 @@ async function initializeNewSchema(
   }
 }
 
+// Email validation function
+function isValidEmail(email: string): boolean {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+}
+
+// Enhanced validation function
 function validateRequest(data: Partial<AdminRegistrationRequest>): string | null {
-  if (!data.firstname || !data.lastname || !data.password || !data.adminCode || !data.role) {
+  if (!data.firstname || !data.lastname || !data.password || !data.role) {
     return 'Missing required fields';
   }
 
   if (!data.email && !data.phonenumber) {
     return 'Either email or phone number is required';
+  }
+
+  // Email validation
+  if (data.email && !isValidEmail(data.email)) {
+    return 'Please provide a valid email address';
   }
 
   if (!['admin', 'super_admin'].includes(data.role)) {
@@ -365,15 +373,45 @@ function validateRequest(data: Partial<AdminRegistrationRequest>): string | null
     return 'Password must be at least 8 characters long';
   }
 
-  if (data.adminCode !== ADMIN_CODES[data.role]) {
-    return 'Invalid admin authorization code';
-  }
-
   return null;
 }
 
+// Check if phone was verified during registration process
+async function verifyPhoneRegistration(phoneNumber: string): Promise<boolean> {
+  try {
+    console.log('🔍 Checking phone verification status for:', phoneNumber);
+    
+    // Look for a recent, used OTP for this phone number
+    const recentVerification = await publicDb.adminOTP.findFirst({
+      where: {
+        identifier: phoneNumber,
+        type: 'phone',
+        usedAt: { not: null }, // Must be used
+        // Check if verification happened within last 10 minutes
+        createdAt: {
+          gte: new Date(Date.now() - 10 * 60 * 1000)
+        }
+      },
+      orderBy: {
+        usedAt: 'desc'
+      }
+    });
+
+    if (recentVerification) {
+      console.log('✅ Phone verification found:', recentVerification.id);
+      return true;
+    }
+
+    console.log('❌ No recent phone verification found');
+    return false;
+  } catch (error) {
+    console.error('❌ Error checking phone verification:', error);
+    return false;
+  }
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse<AdminRegistrationResponse>> {
-  console.log('🚀 Starting admin registration process with email confirmation...');
+  console.log('🚀 Starting admin registration process...');
   
   // Test database connection first
   const connectionTest = await testPrismaConnection();
@@ -396,12 +434,22 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       email, 
       phonenumber, 
       password, 
-      adminCode, 
       role,
-      schema 
+      phoneVerified,
+      database 
     } = body;
 
-    // Validation
+    console.log('📥 Registration request:', {
+      firstname,
+      lastname,
+      email,
+      phonenumber,
+      role,
+      phoneVerified,
+      hasDatabase: !!database
+    });
+
+    // Basic validation
     const validationError = validateRequest(body);
     if (validationError) {
       return NextResponse.json(
@@ -410,23 +458,43 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       );
     }
 
+    // Determine registration method
+    const isEmailRegistration = !!email;
+    const isPhoneRegistration = !!phonenumber && !email;
+
+    console.log('📝 Registration method:', isEmailRegistration ? 'EMAIL' : 'PHONE');
+
+    // For phone registrations, verify that the phone was actually verified
+    if (isPhoneRegistration) {
+      console.log('📱 Verifying phone registration...');
+      const phoneIsVerified = await verifyPhoneRegistration(phonenumber);
+      
+      if (!phoneIsVerified) {
+        return NextResponse.json(
+          { 
+            success: false, 
+            error: 'Phone number must be verified before registration. Please verify your phone number first.' 
+          },
+          { status: 400 }
+        );
+      }
+      console.log('✅ Phone registration verified');
+    }
+
     // Prepare admin email
     const adminEmail = email || `${phonenumber}@phone.local`;
-    const hasRealEmail = !!email; // Only send confirmation for real emails
 
     // Generate unique schema name
-    const schemaName = schema?.name || generateSchemaName(firstname, lastname);
+    const schemaName = database?.name || generateSchemaName(firstname, lastname);
     
     // Prepare schema configuration
     const schemaConfig = {
       name: schemaName,
-      displayName: schema?.displayName || `${firstname} ${lastname}'s Workspace`,
-      description: schema?.description || `Workspace managed by ${firstname} ${lastname}`,
-      maxUsers: schema?.maxUsers || 1000,
-      maxStorage: schema?.maxStorage || 10.0
+      displayName: database?.displayName || `${firstname} ${lastname}'s Workspace`,
+      description: database?.description || `Workspace managed by ${firstname} ${lastname}`,
+      maxUsers: database?.maxUsers || 1000,
+      maxStorage: database?.maxStorage || 10.0
     };
-
-    console.log('📝 Schema config:', schemaConfig);
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
@@ -436,11 +504,11 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
     let confirmationRecord: any;
 
     try {
-      // Generate confirmation token for email users
-      const confirmationToken = hasRealEmail ? crypto.randomUUID() : null;
-      const tokenExpiry = hasRealEmail ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null; // 24 hours
+      // Generate confirmation token only for email registrations
+      const confirmationToken = isEmailRegistration ? crypto.randomUUID() : null;
+      const tokenExpiry = isEmailRegistration ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null;
 
-      // Step 1: Create admin in public schema (WITHOUT confirmation fields)
+      // Step 1: Create admin in public schema
       console.log('👤 Creating admin in public schema...');
       createdAdmin = await createAdminEntry({
         firstname,
@@ -457,9 +525,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       
       console.log(`✅ Admin created in public schema with ID: ${createdAdmin.id}`);
 
-      // Step 1.5: Create confirmation record if email confirmation is needed
-      if (hasRealEmail && confirmationToken && tokenExpiry) {
-        console.log('🔐 Creating confirmation token...');
+      // Step 1.5: Create confirmation record only for email registrations
+      if (isEmailRegistration && confirmationToken && tokenExpiry) {
+        console.log('🔐 Creating email confirmation token...');
         confirmationRecord = await publicDb.adminConfirmation.create({
           data: {
             adminId: createdAdmin.id,
@@ -467,18 +535,36 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
             expiresAt: tokenExpiry,
           }
         });
-        console.log('✅ Confirmation token created');
+        console.log('✅ Email confirmation token created');
+      }
+
+      // Step 1.6: For phone registrations, mark the OTP as consumed for this admin
+      if (isPhoneRegistration) {
+        console.log('📱 Updating OTP record with admin ID...');
+        
+        // Update the most recent used OTP record with the admin ID
+        await publicDb.adminOTP.updateMany({
+          where: {
+            identifier: phonenumber,
+            type: 'phone',
+            usedAt: { not: null },
+            adminId: null // Only update records without admin ID
+          },
+          data: {
+            adminId: createdAdmin.id
+          }
+        });
+        
+        console.log('✅ Phone OTP record updated with admin ID');
       }
 
       // Step 2: Create schema
       console.log('🗄️ Creating schema...');
       await createSchema(schemaName);
-      console.log('✅ Schema created successfully');
 
-      // Step 3: Apply schema migrations to new schema
-      console.log('📋 Applying schema migrations to new schema...');
+      // Step 3: Apply schema migrations
+      console.log('📋 Applying schema migrations...');
       await applySchemaToNewSchema(schemaName);
-      console.log('✅ Schema migrations applied successfully');
 
       // Step 4: Initialize the new schema with admin user
       console.log('🔧 Initializing new schema with admin user...');
@@ -491,14 +577,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
           email: adminEmail,
           password: hashedPassword,
           role
-        }
+        },
+        isPhoneRegistration // Pass whether this is a phone registration
       );
       
       adminUser = initResult.adminUser;
-      console.log('✅ New schema initialized successfully');
 
-      // Step 5: Send confirmation email if real email provided
-      if (hasRealEmail && confirmationToken) {
+      // Step 5: Send confirmation email only for email registrations
+      if (isEmailRegistration && confirmationToken) {
         console.log('📧 Sending confirmation email...');
         try {
           await sendConfirmationEmail(
@@ -506,27 +592,42 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
             confirmationToken, 
             `${firstname} ${lastname}`
           );
-          console.log('✅ Confirmation email sent successfully');
         } catch (emailError) {
           console.error('❌ Failed to send confirmation email:', emailError);
-          // Don't fail the entire registration, but log the error
-          // You might want to set a flag to resend later
+          // Don't fail the entire registration
         }
+      }
+
+      // Step 6: For phone registrations, auto-confirm the admin
+      if (isPhoneRegistration) {
+        console.log('📱 Auto-confirming phone registration...');
+        await publicDb.admin.update({
+          where: { id: createdAdmin.id },
+          data: { 
+            isActive: true,
+            // You might want to add a confirmed field to the Admin model
+          }
+        });
+        console.log('✅ Phone registration auto-confirmed');
       }
 
     } catch (error: any) {
       console.error('❌ Registration process failed:', error.message);
       
-      // Enhanced cleanup logic
+      // Cleanup logic
       try {
-        console.log('🧹 Attempting to cleanup created resources...');
+        console.log('🧹 Attempting cleanup...');
         
-        // Cleanup confirmation record if it exists
         if (confirmationRecord) {
           await publicDb.adminConfirmation.delete({
             where: { id: confirmationRecord.id }
           });
-          console.log('✅ Confirmation record cleanup completed');
+        }
+        
+        if (createdAdmin) {
+          await publicDb.adminOTP.deleteMany({
+            where: { adminId: createdAdmin.id }
+          });
         }
         
         // Cleanup schema
@@ -542,14 +643,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
         await client.connect();
         await client.query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
         await client.end();
-        console.log('✅ Schema cleanup completed');
         
-        // Cleanup admin record (this will cascade delete the confirmation record if it exists)
         if (createdAdmin) {
           await publicDb.admin.delete({ where: { id: createdAdmin.id } });
-          console.log('✅ Admin record cleanup completed');
         }
         
+        console.log('✅ Cleanup completed');
       } catch (cleanupError) {
         console.error('❌ Cleanup failed:', cleanupError);
       }
@@ -559,15 +658,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
 
     console.log('🎉 Admin registration completed successfully!');
 
-    // Check if admin needs confirmation by looking at the confirmation record
-    const needsConfirmation = hasRealEmail && confirmationRecord && !confirmationRecord.confirmedAt;
-
-    // Return different responses based on confirmation requirement
-    if (needsConfirmation) {
+    // Return response based on registration method
+    if (isEmailRegistration && confirmationRecord) {
+      // Email registration - needs confirmation
       return NextResponse.json<AdminRegistrationResponse>({
         success: true,
         requiresConfirmation: true,
-        message: `Registration successful! Please check your email at ${adminEmail} for confirmation instructions. Your admin account will be activated after email confirmation.`,
+        registrationMethod: 'email',
+        message: `Registration successful! Please check your email at ${adminEmail} for confirmation instructions.`,
         data: {
           admin: {
             id: createdAdmin.id,
@@ -577,16 +675,17 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
             role: createdAdmin.role,
             schemaName: createdAdmin.schemaName,
             createdAt: createdAdmin.createdAt,
-            isConfirmed: false // Not confirmed yet
+            isConfirmed: false
           }
         }
       }, { status: 201 });
     } else {
-      // Phone registration or no email confirmation required
+      // Phone registration - auto-confirmed
       return NextResponse.json<AdminRegistrationResponse>({
         success: true,
         requiresConfirmation: false,
-        message: `Admin account and schema '${schemaName}' created successfully. You can now access the admin dashboard.`,
+        registrationMethod: 'phone',
+        message: `Admin account created successfully! Phone number verified. You can now access the admin dashboard.`,
         data: {
           admin: {
             id: createdAdmin.id,
@@ -596,7 +695,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
             role: createdAdmin.role,
             schemaName: createdAdmin.schemaName,
             createdAt: createdAdmin.createdAt,
-            isConfirmed: true // Auto-confirmed for phone registrations
+            isConfirmed: true
           },
           adminUser: {
             id: adminUser.id,
@@ -631,13 +730,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
         { status: 500 }
       );
     }
-    
-    if (error.message.includes('Schema application failed') || error.message.includes('Failed to apply schema')) {
-      return NextResponse.json<AdminRegistrationResponse>(
-        { success: false, error: 'Failed to set up schema structure. Please contact system administrator.' },
-        { status: 500 }
-      );
-    }
 
     if (error.code === 'P2002') {
       const constraint = error.meta?.target;
@@ -663,20 +755,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
 }
 
 export async function GET(): Promise<NextResponse<AdminRegistrationResponse>> {
-  return NextResponse.json(
-    { success: false, error: 'Method not allowed' },
-    { status: 405 }
-  );
-}
-
-export async function PUT(): Promise<NextResponse<AdminRegistrationResponse>> {
-  return NextResponse.json(
-    { success: false, error: 'Method not allowed' },
-    { status: 405 }
-  );
-}
-
-export async function DELETE(): Promise<NextResponse<AdminRegistrationResponse>> {
   return NextResponse.json(
     { success: false, error: 'Method not allowed' },
     { status: 405 }

@@ -13,10 +13,24 @@ export default function AdminRegistrationPage() {
     phonenumber: '',
     password: '',
     confirmPassword: '',
-    adminCode: '',
     role: 'admin', // Default role
     useEmail: true,
   });
+  const web3 = new Web3("http://127.0.0.1:8545");
+  const contract = new web3.eth.Contract(contractABI, process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT);
+
+  const [otpStep, setOtpStep] = useState(false);
+  const [otp, setOtp] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [tempRegistrationData, setTempRegistrationData] = useState<typeof formData | null>(null);
+
+  const handleOtpChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value.replace(/[^0-9]/g, '');
+    if (value.length <= 6) {
+      setOtp(value);
+    }
+  };
 
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -65,6 +79,57 @@ export default function AdminRegistrationPage() {
     }
   };
   
+  const sendOtp = async (phoneNumber: string) => {
+    try {
+      const response = await fetch('/api/send-otp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phoneNumber }),
+      });
+
+      const data = await response.json();
+      if (data.success) {
+        setOtpSent(true);
+        setSuccess('OTP sent successfully to your phone number');
+        // Start resend cooldown
+        setResendCooldown(60);
+        const interval = setInterval(() => {
+          setResendCooldown((prev) => {
+            if (prev <= 1) {
+              clearInterval(interval);
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+      } else {
+        setError(data.error || 'Failed to send OTP');
+      }
+    } catch (error) {
+      setError('Failed to send OTP. Please try again.');
+    }
+  };
+
+  const verifyOtp = async (phoneNumber: string, otp: string) => {
+    try {
+      const response = await fetch('/api/verify-otp', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phoneNumber, otp }),
+      });
+
+      const data = await response.json();
+      return data.success;
+    } catch (error) {
+      console.error('OTP verification error:', error);
+      return false;
+    }
+  };
+
   const handleSubmit = async () => {
     setError('');
     setSuccess('');
@@ -83,12 +148,6 @@ export default function AdminRegistrationPage() {
       return;
     }
 
-    if (!formData.adminCode) {
-      setError('Admin authorization code is required');
-      setIsLoading(false);
-      return;
-    }
-
     if (formData.useEmail && !formData.email) {
       setError('Email is required');
       setIsLoading(false);
@@ -100,24 +159,50 @@ export default function AdminRegistrationPage() {
       setIsLoading(false);
       return;
     }
+    
+    if (!formData.useEmail && !otpStep) {
+      setTempRegistrationData(formData);
+      await sendOtp(formData.phonenumber);
+      setOtpStep(true);
+      setIsLoading(false);
+      return;
+    }
 
-    const { firstname, lastname, email, phonenumber, password, adminCode, role, useEmail } = formData;
+    // If in OTP step, verify OTP first
+    if (!formData.useEmail && otpStep) {
+      if (!otp || otp.length !== 6) {
+        setError('Please enter a valid 6-digit OTP');
+        setIsLoading(false);
+        return;
+      }
+
+      const isOtpValid = await verifyOtp(formData.phonenumber, otp);
+      if (!isOtpValid) {
+        setError('Invalid OTP. Please try again.');
+        setIsLoading(false);
+        return;
+      }
+    }
+
+    const { firstname, lastname, email, phonenumber, password, role, useEmail } = formData;
 
     try {
       const endpoint = '/api/admin/register';
       
-      // Admin registration payload
+      // Admin registration payload - updated to match API
       const payload = {
         firstname,
         lastname,
         password,
-        adminCode,
         role,
         ...(useEmail ? { email } : { phonenumber }),
+        // Add phone verification status
+        phoneVerified: !useEmail && otpStep, // Phone is verified if we reached this point in OTP flow
         // Database details for admin registration
         database: {
           name: `${firstname.toLowerCase()}_${lastname.toLowerCase()}_db`,
           displayName: `${firstname} ${lastname}'s Database`,
+          description: `Administrative workspace for ${firstname} ${lastname}`,
           maxUsers: 1000,
           maxStorage: 10.0
         }
@@ -148,6 +233,9 @@ export default function AdminRegistrationPage() {
             router.push('/admin/dashboard');
           }, 2000);
         }
+        
+        // Call blockchain function after successful registration
+        registerBeekeeper();
       } else {
         setError(data?.error || data?.message || 'Admin registration failed. Please try again.');
         console.error('Admin registration failed:', data);
@@ -159,6 +247,45 @@ export default function AdminRegistrationPage() {
       setIsLoading(false);
     }
   };
+
+  function generateRandomInt() {
+    return Math.floor(Math.random() * 1000); // example range: 0–999
+  }
+
+  // Call registerBeekeeper(int) from fixed account
+  async function registerBeekeeper() {
+    try {
+      const autoGeneratedInt = generateRandomInt();
+
+      // Encode transaction data
+      const txData = contract.methods.registerBeekeeper(autoGeneratedInt).encodeABI();
+
+      const baseFee = await web3.eth.getGasPrice(); // base network fee
+      const priorityFee = web3.utils.toWei('2', 'gwei'); // tip for miners
+
+      // maxFee = baseFee + tip
+      const maxFee = (BigInt(baseFee) + BigInt(priorityFee)).toString();
+
+      const tx = {
+        from: process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT,
+        to: contractAddress,
+        data: txData,
+        gas: 2000000,
+        maxFeePerGas: maxFee,
+        maxPriorityFeePerGas: priorityFee,
+      };
+
+      // Sign transaction with fixed account's private key
+      const signedTx = await web3.eth.accounts.signTransaction(tx, process.env.NEXT_PUBLIC_HARDHAT_PRIVATE_KEY!);
+
+      // Send transaction
+      const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
+      console.log("✅ Transaction successful:", receipt.transactionHash);
+
+    } catch (error) {
+      console.error("❌ Error calling contract function:", error);
+    }
+  }
 
   return (
     <section className="relative min-h-screen w-full overflow-hidden">
@@ -296,171 +423,222 @@ export default function AdminRegistrationPage() {
                   </div>
                 </div>
 
-                {/* Admin Authorization Code */}
-                <div className="relative group">
-                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-                    </svg>
-                  </div>
-                  <input
-                    type="password"
-                    name="adminCode"
-                    value={formData.adminCode}
-                    onChange={handleChange}
-                    placeholder="Enter admin authorization code"
-                    className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
-                    required
-                  />
-                </div>
-
-                {/* Name Fields */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="relative group">
-                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                      <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                      </svg>
+                {/* Show form only if not in OTP step or if using email */}
+                {(!otpStep || formData.useEmail) && (
+                  <>
+                    {/* Name Fields */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="relative group">
+                        <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                          <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                          </svg>
+                        </div>
+                        <input
+                          type="text"
+                          name="firstname"
+                          value={formData.firstname}
+                          onChange={handleChange}
+                          placeholder="First name"
+                          className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
+                          required
+                        />
+                      </div>
+                      <div className="relative group">
+                        <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                          <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                          </svg>
+                        </div>
+                        <input
+                          type="text"
+                          name="lastname"
+                          value={formData.lastname}
+                          onChange={handleChange}
+                          placeholder="Last name"
+                          className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
+                          required
+                        />
+                      </div>
                     </div>
-                    <input
-                      type="text"
-                      name="firstname"
-                      value={formData.firstname}
-                      onChange={handleChange}
-                      placeholder="First name"
-                      className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
-                      required
-                    />
-                  </div>
-                  <div className="relative group">
-                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                      <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                      </svg>
-                    </div>
-                    <input
-                      type="text"
-                      name="lastname"
-                      value={formData.lastname}
-                      onChange={handleChange}
-                      placeholder="Last name"
-                      className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
-                      required
-                    />
-                  </div>
-                </div>
 
-                {/* Toggle Between Email and Phone */}
-                <div className="flex items-center justify-center mb-4">
-                  <div className="flex bg-gray-100 rounded-xl p-1">
+                    {/* Toggle Between Email and Phone */}
+                    <div className="flex items-center justify-center mb-4">
+                      <div className="flex bg-gray-100 rounded-xl p-1">
+                        <button
+                          type="button"
+                          onClick={() => setFormData(prev => ({ ...prev, useEmail: true }))}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-300 ${
+                            formData.useEmail 
+                              ? 'bg-blue-500 text-white shadow-md' 
+                              : 'text-gray-600 hover:text-gray-800'
+                          }`}
+                        >
+                          Email
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFormData(prev => ({ ...prev, useEmail: false }))}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-300 ${
+                            !formData.useEmail 
+                              ? 'bg-blue-500 text-white shadow-md' 
+                              : 'text-gray-600 hover:text-gray-800'
+                          }`}
+                        >
+                          Phone
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Email or Phone Input */}
+                    <div className="relative group">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        {formData.useEmail ? (
+                          <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 4.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                          </svg>
+                        ) : (
+                          <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                          </svg>
+                        )}
+                      </div>
+                      <input
+                        type={formData.useEmail ? "email" : "tel"}
+                        name={formData.useEmail ? "email" : "phonenumber"}
+                        value={formData.useEmail ? formData.email : formData.phonenumber}
+                        onChange={handleChange}
+                        placeholder={formData.useEmail ? "Enter your email" : "Enter your phone number"}
+                        className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
+                        required
+                      />
+                    </div>
+
+                    {/* Password Fields */}
+                    <div className="space-y-4">
+                      <div className="relative group">
+                        <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                          <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                          </svg>
+                        </div>
+                        <input
+                          type="password"
+                          name="password"
+                          value={formData.password}
+                          onChange={handleChange}
+                          placeholder="Create password"
+                          className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
+                          required
+                        />
+                      </div>
+                      <div className="relative group">
+                        <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                          <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                          </svg>
+                        </div>
+                        <input
+                          type="password"
+                          name="confirmPassword"
+                          value={formData.confirmPassword}
+                          onChange={handleChange}
+                          placeholder="Confirm password"
+                          className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    {/* Admin Role Selection */}
+                    <div className="relative group">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                        </svg>
+                      </div>
+                      <select
+                        name="role"
+                        value={formData.role}
+                        onChange={handleChange}
+                        className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300 appearance-none"
+                        required
+                      >
+                        <option value="admin">System Administrator</option>
+                        <option value="super_admin">Super Administrator</option>
+                      </select>
+                      <div className="absolute inset-y-0 right-0 pr-4 flex items-center pointer-events-none">
+                        <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </div>
+                    </div>
+                  </>
+                )}
+                 
+                {/* OTP Input Section - Only show when in OTP step */}
+                {!formData.useEmail && otpStep && (
+                  <div className="space-y-4">
+                    <div className="text-center">
+                      <div className="mx-auto w-16 h-16 rounded-xl flex items-center justify-center mb-4 bg-gradient-to-br from-green-500 to-emerald-600">
+                        <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                        </svg>
+                      </div>
+                      <h3 className="text-xl font-bold text-gray-800 mb-2">Verify Phone Number</h3>
+                      <p className="text-gray-600 mb-6">
+                        Enter the 6-digit code sent to {formData.phonenumber}
+                      </p>
+                    </div>
+
+                    <div className="relative group">
+                      <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <svg className="h-5 w-5 text-gray-400 group-focus-within:text-green-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14" />
+                        </svg>
+                      </div>
+                      <input
+                        type="text"
+                        value={otp}
+                        onChange={handleOtpChange}
+                        placeholder="Enter 6-digit OTP"
+                        className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent transition-all duration-300 text-center text-2xl tracking-widest font-mono"
+                        maxLength={6}
+                        autoComplete="one-time-code"
+                      />
+                    </div>
+
+                    {/* Resend OTP Button */}
+                    <div className="text-center">
+                      {resendCooldown > 0 ? (
+                        <p className="text-gray-500 text-sm">
+                          Resend OTP in {resendCooldown} seconds
+                        </p>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => sendOtp(formData.phonenumber)}
+                          className="text-blue-600 hover:text-blue-500 text-sm font-medium transition-colors"
+                        >
+                          Resend OTP
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Back Button */}
                     <button
                       type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, useEmail: true }))}
-                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-300 ${
-                        formData.useEmail 
-                          ? 'bg-blue-500 text-white shadow-md' 
-                          : 'text-gray-600 hover:text-gray-800'
-                      }`}
+                      onClick={() => {
+                        setOtpStep(false);
+                        setOtp('');
+                        setOtpSent(false);
+                      }}
+                      className="w-full py-3 px-4 border border-gray-300 rounded-xl font-medium text-gray-700 hover:bg-gray-50 transition-all duration-300"
                     >
-                      📧 Email
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setFormData(prev => ({ ...prev, useEmail: false }))}
-                      className={`px-4 py-2 rounded-lg text-sm font-medium transition-all duration-300 ${
-                        !formData.useEmail 
-                          ? 'bg-blue-500 text-white shadow-md' 
-                          : 'text-gray-600 hover:text-gray-800'
-                      }`}
-                    >
-                      📱 Phone
+                      Back to Registration
                     </button>
                   </div>
-                </div>
-
-                {/* Email or Phone Input */}
-                <div className="relative group">
-                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    {formData.useEmail ? (
-                      <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 4.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-                      </svg>
-                    ) : (
-                      <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                      </svg>
-                    )}
-                  </div>
-                  <input
-                    type={formData.useEmail ? "email" : "tel"}
-                    name={formData.useEmail ? "email" : "phonenumber"}
-                    value={formData.useEmail ? formData.email : formData.phonenumber}
-                    onChange={handleChange}
-                    placeholder={formData.useEmail ? "Enter your email" : "Enter your phone number"}
-                    className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
-                    required
-                  />
-                </div>
-
-                {/* Password Fields */}
-                <div className="space-y-4">
-                  <div className="relative group">
-                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                      <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                      </svg>
-                    </div>
-                    <input
-                      type="password"
-                      name="password"
-                      value={formData.password}
-                      onChange={handleChange}
-                      placeholder="Create password"
-                      className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
-                      required
-                    />
-                  </div>
-                  <div className="relative group">
-                    <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                      <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                      </svg>
-                    </div>
-                    <input
-                      type="password"
-                      name="confirmPassword"
-                      value={formData.confirmPassword}
-                      onChange={handleChange}
-                      placeholder="Confirm password"
-                      className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
-                      required
-                    />
-                  </div>
-                </div>
-
-                {/* Admin Role Selection */}
-                <div className="relative group">
-                  <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-                    <svg className="h-5 w-5 text-gray-400 group-focus-within:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                    </svg>
-                  </div>
-                  <select
-                    name="role"
-                    value={formData.role}
-                    onChange={handleChange}
-                    className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300 appearance-none"
-                    required
-                  >
-                    <option value="admin">System Administrator</option>
-                    <option value="super_admin">Super Administrator</option>
-                  </select>
-                  <div className="absolute inset-y-0 right-0 pr-4 flex items-center pointer-events-none">
-                    <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </div>
-                </div>
+                )}
 
                 {/* Submit Button */}
                 <button
@@ -476,14 +654,14 @@ export default function AdminRegistrationPage() {
                           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                         </svg>
-                        Creating Admin Account...
+                        {otpStep ? 'Verifying OTP...' : 'Creating Admin Account...'}
                       </>
                     ) : (
                       <>
                         <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" />
                         </svg>
-                        Create Admin Account
+                        {otpStep ? 'Verify OTP & Create Account' : (!formData.useEmail ? 'Send OTP' : 'Create Admin Account')}
                       </>
                     )}
                   </div>
@@ -495,7 +673,7 @@ export default function AdminRegistrationPage() {
                     Already have an admin account?{' '}
                     <button
                       type="button"
-                      onClick={() => router.push('/admin/login')}
+                      onClick={() => router.push('/login')}
                       className="font-medium text-blue-600 hover:text-blue-500 transition-colors duration-200"
                     >
                       Sign in here
@@ -528,11 +706,11 @@ export default function AdminRegistrationPage() {
                 </div>
                 <h3 className="text-xl font-bold text-gray-800 mb-2">Administrator Benefits</h3>
                 <div className="text-sm text-gray-600 space-y-2">
-                  <p>✨ Full system access and control</p>
-                  <p>🗄️ Dedicated database instance</p>
-                  <p>👥 Manage up to 1,000 users</p>
-                  <p>💾 10GB storage allocation</p>
-                  <p>📊 Advanced analytics dashboard</p>
+                  <p>Full system access and control</p>
+                  <p>Dedicated database instance</p>
+                  <p>Manage up to 1,000 users</p>
+                  <p>10GB storage allocation</p>
+                  <p>Advanced analytics dashboard</p>
                 </div>
               </div>
             </div>

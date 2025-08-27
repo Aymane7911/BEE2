@@ -90,14 +90,52 @@ const Header = ({
     bothCertifications: 0 
   });
 
-  // Mock fetch function for demo
+  // Auth headers helper
+  const getAuthHeaders = (): Record<string, string> => {
+    const token = getTokenFromStorage();
+    if (token) {
+      return {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      };
+    }
+    return {
+      'Content-Type': 'application/json',
+    };
+  };
+
+  // Enhanced fetch function that actually calls your API
   const fetchTokenStats = async () => {
     setIsLoadingTokens(true);
     setTokenError(null);
     
-    // Simulate API call
-    setTimeout(() => {
-      setTokenStats({
+    try {
+      const headers = getAuthHeaders();
+      const response = await fetch('/api/token-stats/update', {
+        method: 'GET',
+        headers: headers,
+      });
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          setTokenError('Authentication failed');
+          return;
+        }
+        throw new Error('Failed to fetch token stats');
+      }
+
+      const data = await response.json();
+      console.log('🔄 Fetched fresh token stats:', data);
+      
+      setTokenStats(data);
+      setActualTokenBalance(data.remainingTokens);
+      
+    } catch (error) {
+      console.error('❌ Error fetching token stats:', error);
+      setTokenError('Failed to load token stats');
+      
+      // Fallback to mock data for demo
+      const mockStats = {
         userId: 1,
         totalTokens: tokenBalance,
         remainingTokens: tokenBalance,
@@ -105,10 +143,54 @@ const Header = ({
         qualityOnly: 0,
         bothCertifications: 0,
         usedTokens: 0
-      });
+      };
+      setTokenStats(mockStats);
+    } finally {
       setIsLoadingTokens(false);
-    }, 1000);
+    }
   };
+
+  // Listen for token updates from purchases
+  useEffect(() => {
+    const handleTokenUpdate = (event: CustomEvent) => {
+      console.log('🎉 Received token update event:', event.detail);
+      
+      if (event.detail.action === 'add') {
+        const { tokensAdded, newBalance } = event.detail;
+        
+        // Update local state immediately for responsive UI
+        setTokenStats(prev => {
+          if (prev) {
+            const updated = {
+              ...prev,
+              totalTokens: prev.totalTokens + tokensAdded,
+              remainingTokens: newBalance
+            };
+            setActualTokenBalance(updated.remainingTokens);
+            return updated;
+          }
+          return prev;
+        });
+        
+        // Fetch fresh data from server to ensure accuracy
+        setTimeout(() => {
+          fetchTokenStats();
+        }, 1000);
+      }
+    };
+
+    // Listen for custom token update events
+    window.addEventListener('tokensUpdated', handleTokenUpdate as EventListener);
+    
+    return () => {
+      window.removeEventListener('tokensUpdated', handleTokenUpdate as EventListener);
+    };
+  }, []);
+
+  // Load initial token stats
+  useEffect(() => {
+    fetchTokenStats();
+  }, []);
 
   useEffect(() => {
     const totalPendingTokens = pendingTokens.originOnly + pendingTokens.qualityOnly + pendingTokens.bothCertifications;
@@ -149,7 +231,7 @@ const Header = ({
         </div>
 
         <div className="flex items-center space-x-3">
-          {/* Token Balance Section - More Compact */}
+          {/* Token Balance Section - Enhanced with better status indicators */}
           <div className="group relative mr-3 bg-gradient-to-r from-gray-900/80 to-gray-800/80 backdrop-blur-xl
                          p-4 rounded-xl border border-gray-700/30 shadow-xl
                          transform transition-all duration-500 hover:scale-105
@@ -157,10 +239,13 @@ const Header = ({
             <div className="absolute inset-0 bg-gradient-to-r from-yellow-500/10 via-transparent to-purple-500/10
                             opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
             
-            {/* Status indicators - smaller */}
+            {/* Status indicators */}
             <div className="absolute top-1.5 right-3 w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse"></div>
             {tokenError && (
               <div className="absolute top-1.5 left-3 w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse"></div>
+            )}
+            {isLoadingTokens && (
+              <div className="absolute top-1.5 left-1/2 transform -translate-x-1/2 w-1.5 h-1.5 bg-blue-500 rounded-full animate-pulse"></div>
             )}
             
             <div className="relative z-10">
@@ -184,13 +269,18 @@ const Header = ({
                     Loading...
                   </div>
                 )}
+                {tokenError && (
+                  <div className="ml-2 px-1.5 py-0.5 bg-red-500/20 text-red-400 text-xs rounded-full border border-red-400/30">
+                    Error
+                  </div>
+                )}
               </div>
               
               <div className="flex items-center">
                 <p className="text-lg font-bold bg-gradient-to-r from-yellow-400 to-yellow-200
                               bg-clip-text text-transparent transition-all duration-300
                               group-hover:from-yellow-300 group-hover:to-white">
-                  {isLoadingTokens ? '...' : actualTokenBalance}
+                  {isLoadingTokens ? '...' : actualTokenBalance.toLocaleString()}
                 </p>
                 
                 <button
@@ -223,7 +313,7 @@ const Header = ({
             </button>
           </div>
 
-          {/* Action Buttons - More Compact */}
+          {/* Action Buttons */}
           <button
             onClick={handleDashboardClick}
             className="group relative overflow-hidden px-4 py-2.5 rounded-lg font-medium text-sm shadow-lg
@@ -317,7 +407,7 @@ const Header = ({
       </div>
       
       <p className="text-gray-600 text-xs mt-3 relative z-10 opacity-75">
-        Last updated: {lastUpdated}
+        Last updated: {lastUpdated} {tokenError && <span className="text-red-500">({tokenError})</span>}
       </p>
     </header>
   );

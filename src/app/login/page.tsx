@@ -251,7 +251,7 @@ export default function AdminLoginPage() {
             <div className="bg-white/10 backdrop-blur-sm rounded-xl p-6 border border-white/20">
               <p className="text-white mb-4">Need an admin account?</p>
               <button
-                onClick={() => router.push('/admin/register')}
+                onClick={() => router.push('/register')}
                 className="inline-flex items-center gap-2 px-6 py-3 rounded-xl font-semibold text-white border-2 transition-all duration-300 hover:scale-105 hover:shadow-lg border-blue-400 hover:bg-blue-400/20 hover:border-blue-300"
               >
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

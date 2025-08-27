@@ -2,6 +2,8 @@
 
 import React, { useState, useRef, useEffect} from 'react';
 import { useSession } from 'next-auth/react';
+import Web3 from 'web3';
+import { contractABI, contractAddress } from '../../contractsinfo';
 import { Session } from 'next-auth';
 import { 
   User, 
@@ -36,6 +38,7 @@ import {
   Printer,
   ExternalLink // Added ExternalLink icon
 } from 'lucide-react';
+
 
 // Header component
 interface HeaderProps {
@@ -199,6 +202,8 @@ const ProfilePage = () => {
     kilosCollected: 0
   });
   const [showAddApiary, setShowAddApiary] = useState(false);
+   const web3 = new Web3("http://127.0.0.1:8545");
+   const contract = new web3.eth.Contract(contractABI,process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT);
 
   // Add these API functions
   const fetchApiaries = async () => {
@@ -454,6 +459,10 @@ const ProfilePage = () => {
       return null;
     }
   };
+  
+  
+   
+
 
   // Initialize authentication state
   useEffect(() => {
@@ -575,32 +584,128 @@ const ProfilePage = () => {
   const faceScanRef = useRef<HTMLInputElement>(null);
 
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen);
-
-  const handleFileUpload = (type: string, file: File | null) => {
-    if (file) {
+const handleFileUpload = async (type: string, file: File | null) => {
+  console.log('🔄 handleFileUpload called with:', { type, file: file?.name });
+  
+  if (file) {
+    console.log('📁 File details:', {
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      lastModified: file.lastModified
+    });
+    
+    try {
+      // Fetch user profile to get adminId
+      console.log('👤 Fetching user profile to get adminId...');
+      const userData = await fetchUserProfile();
+      
+      if (!userData) {
+        console.error('❌ Failed to fetch user profile, cannot get adminId');
+        throw new Error('Unable to fetch user profile');
+      }
+      
+      console.log('✅ User profile fetched:', userData);
+      
+     
+      
+      // Continue with file upload processing
       const reader = new FileReader();
+      
       reader.onload = (e) => {
+        console.log('📖 File reader onload triggered');
         if (e.target?.result) {
+          console.log('📄 File read successfully, updating user profile...');
+          console.log('🔧 Updating profile field:', type);
+          
           setUserProfile(prev => ({
             ...prev,
             [type]: e.target!.result
           }));
           
+          console.log('✅ User profile updated for field:', type);
+                   
           // Update verification status
           if (type === 'passportScan' || type === 'faceScan') {
+            const verificationField = type === 'passportScan' ? 'identity' : 'face';
+            console.log('🔐 Updating verification status for:', verificationField);
+            
             setUserProfile(prev => ({
               ...prev,
               verificationStatus: {
                 ...prev.verificationStatus,
-                [type === 'passportScan' ? 'identity' : 'face']: true
+                [verificationField]: true
+              }
+            }));
+            
+            console.log('✅ Verification status updated for:', verificationField);
+          }
+        } else {
+          console.log('❌ File reader result is empty');
+        }
+      };
+      
+      reader.onerror = (error) => {
+        console.error('❌ File reader error:', error);
+      };
+      
+      reader.readAsDataURL(file);
+      console.log('📖 File reader started...');
+      
+    } catch (error) {
+    const err = error as Error;
+    console.error('❌ Error in refreshData:');
+    console.error('📋 Error type:', err?.constructor?.name);
+    console.error('📋 Error message:', err.message);
+    console.error('📋 Full error object:', err);
+    console.error('📋 Stack trace:', err.stack);
+      
+      if (error && typeof error === 'object' && 'code' in error) {
+  console.error('📋 Error code:', (error as any).code);
+}
+      
+      console.log('🔄 Continuing with file upload despite getbatch error...');
+      
+      // Continue with file upload despite getbatch error
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        console.log('📖 File reader onload (error recovery)');
+        if (e.target?.result) {
+          console.log('📄 File read successfully (error recovery)');
+          setUserProfile(prev => ({
+            ...prev,
+            [type]: e.target!.result
+          }));
+                   
+          if (type === 'passportScan' || type === 'faceScan') {
+            const verificationField = type === 'passportScan' ? 'identity' : 'face';
+            console.log('🔐 Updating verification status (error recovery):', verificationField);
+            setUserProfile(prev => ({
+              ...prev,
+              verificationStatus: {
+                ...prev.verificationStatus,
+                [verificationField]: true
               }
             }));
           }
+          console.log('✅ File upload completed despite getbatch error');
         }
       };
+      
+      reader.onerror = (readerError) => {
+        console.error('❌ File reader error (error recovery):', readerError);
+      };
+      
       reader.readAsDataURL(file);
     }
-  };
+  } else {
+    console.log('⚠️ No file provided to handleFileUpload');
+  }
+  
+  console.log('🏁 handleFileUpload function completed');
+};
+
+
 
   const getVerificationColor = (status: boolean) => {
     return status ? 'text-green-600' : 'text-orange-500';

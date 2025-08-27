@@ -1,10 +1,10 @@
 export const contractAddress ="0x5FbDB2315678afecb367f032d93F642f64180aa3";
-export const contractABI =  [
+export const contractABI = [
     {
       "inputs": [
         {
           "internalType": "string",
-          "name": "uri",
+          "name": "uri_",
           "type": "string"
         }
       ],
@@ -463,39 +463,12 @@ export const contractABI =  [
           "type": "uint256"
         }
       ],
-      "name": "getPatchesByBeekeeper",
+      "name": "getPatchCountByBeekeeper",
       "outputs": [
         {
-          "components": [
-            {
-              "internalType": "uint256",
-              "name": "beekeeperId",
-              "type": "uint256"
-            },
-            {
-              "internalType": "uint256",
-              "name": "jarCount",
-              "type": "uint256"
-            },
-            {
-              "internalType": "uint256",
-              "name": "certificateId",
-              "type": "uint256"
-            },
-            {
-              "internalType": "bool",
-              "name": "originCert",
-              "type": "bool"
-            },
-            {
-              "internalType": "bool",
-              "name": "qualityCert",
-              "type": "bool"
-            }
-          ],
-          "internalType": "struct HoneyBatch.HoneyBatch[]",
+          "internalType": "uint256",
           "name": "",
-          "type": "tuple[]"
+          "type": "uint256"
         }
       ],
       "stateMutability": "view",

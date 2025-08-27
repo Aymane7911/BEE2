@@ -31,6 +31,7 @@ model Admin {
   
   // Relations
   adminSessions AdminSession[]
+  adminOtps     adminOTP[] 
 
   @@map("admins")
 }
@@ -233,4 +234,22 @@ model VerificationToken {
 
   @@unique([identifier, token])
   @@map("verification_tokens")
+}
+
+model adminOTP {
+ id         Int      @id @default(autoincrement())
+ adminId    Int?
+ identifier String   // email or phone number
+ type       String   // 'email' or 'phone'
+ otp        String
+ expiresAt  DateTime
+ createdAt  DateTime @default(now())
+ usedAt     DateTime?
+ attempts   Int      @default(0)
+
+ admin Admin? @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+ @@index([adminId])
+ @@index([identifier, type])
+ @@map("admin_otp")
 }

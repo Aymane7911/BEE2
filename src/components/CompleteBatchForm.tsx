@@ -4,6 +4,25 @@ import {
   Upload, Sparkles, FileText, Globe, Map, Plus, AlertTriangle, Wallet,Loader2, CheckCircle
 } from 'lucide-react';
 import { ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar } from 'recharts';
+import Web3 from 'web3';
+import { contractABI, contractAddress } from '../contractsinfo';
+import { number } from 'framer-motion';
+
+interface Admin {
+  id: number;
+  firstname: string;
+  lastname: string;
+  email: string;
+  role: 'admin' | 'super_admin';
+  schemaName: string;
+  displayName?: string;
+  description?: string;
+  maxUsers?: number;
+  maxStorage?: number;
+  isConfirmed: boolean;
+  createdAt: Date;
+  updatedAt?: Date;
+}
 
 
 interface Apiary {
@@ -396,7 +415,6 @@ const VERIFICATION_API_URL = 'https://qualityapi.onrender.com';
       return false;
     }
   }
-
   return true;
 };
 
@@ -404,7 +422,7 @@ const VERIFICATION_API_URL = 'https://qualityapi.onrender.com';
   // Get verification status display
   
   // Enhanced file upload handlers
-  const handleProductionReportUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+const handleProductionReportUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
   const files = e.target.files;
   if (!files || files.length === 0) {
     // No files selected — bail out
@@ -413,6 +431,9 @@ const VERIFICATION_API_URL = 'https://qualityapi.onrender.com';
 
   const file = files[0];
   if (!file) return;
+
+  // Variable to hold IPFS hash
+  let productionReportIpfsHash: string | null = null;
 
   // Update form data with file
   setFormData({
@@ -443,8 +464,10 @@ const VERIFICATION_API_URL = 'https://qualityapi.onrender.com';
     if (result.success || result.IpfsHash) {
       console.log('File uploaded successfully:', result.IpfsHash || result.filePath);
 
-      // Update IPFS status if hash is available
+      // ✅ Store IPFS hash in variable
       if (result.IpfsHash) {
+        productionReportIpfsHash = result.IpfsHash;
+
         setIpfsHashes(prev => ({
           ...prev,
           productionReport: result.IpfsHash
@@ -464,8 +487,11 @@ const VERIFICATION_API_URL = 'https://qualityapi.onrender.com';
         ...(result.IpfsHash && { productionReportIpfsHash: result.IpfsHash })
       }));
 
-      // NO VERIFICATION - This is the key difference from lab report
-      // Production reports upload to IPFS but don't get verified
+      // ✅ Now you can use productionReportIpfsHash here
+      if (productionReportIpfsHash) {
+        console.log("Stored IPFS hash in variable:", productionReportIpfsHash);
+        // e.g. call saveHashToContract(batchId, productionReportIpfsHash);
+      }
 
     } else {
       throw new Error(result.error || 'Upload failed');
@@ -473,19 +499,16 @@ const VERIFICATION_API_URL = 'https://qualityapi.onrender.com';
   } catch (error) {
     console.error('Error uploading file:', error);
 
-    // Set IPFS upload status to error
     setIpfsUploadStatus(prev => ({
       ...prev,
       productionReport: 'error'
     }));
 
-    // Show user-friendly error message
     alert('File upload failed: ' + (error as Error).message);
   }
 };
-
  
-  
+ 
 
 
 
@@ -583,7 +606,8 @@ const addJarToBatch = (sizeInGrams: number, quantity: number) => {
   setNewJarQuantity(1);
 };
 
-
+const web3 = new Web3("http://127.0.0.1:8545");
+  const contract = new web3.eth.Contract(contractABI,process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT);
 
 
 
@@ -629,27 +653,29 @@ const handleLabReportUpload = async (e: React.ChangeEvent<HTMLInputElement>) => 
   }
 
   const file = files[0];
-  
   if (!file) return;
-  
+
+  // Variable to hold IPFS hash
+  let labReportIpfsHash: string | null = null;
+
   // Update form data with file
   setFormData({
     ...formData,
     labReport: file
   });
-  
+
   // Reset verification status
   setVerificationStatus(prev => ({
     ...prev,
     labReport: null
   }));
-  
+
   // Reset IPFS status
   setIpfsUploadStatus(prev => ({ 
     ...prev, 
     labReport: 'uploading' 
   }));
-  
+
   try {
     // Create FormData for file upload to server
     const uploadFormData = new FormData();
@@ -663,12 +689,15 @@ const handleLabReportUpload = async (e: React.ChangeEvent<HTMLInputElement>) => 
     });
     
     const result = await response.json();
-    
+    console.log(result);
     if (result.success || result.IpfsHash) {
       console.log('File uploaded successfully:', result.IpfsHash || result.filePath);
-      
-      // Update IPFS status if hash is available
+
+      // ✅ Store IPFS hash in variable
       if (result.IpfsHash) {
+        labReportIpfsHash = result.IpfsHash;
+
+        // Also keep updating React state
         setIpfsHashes(prev => ({ 
           ...prev, 
           labReport: result.IpfsHash 
@@ -678,8 +707,8 @@ const handleLabReportUpload = async (e: React.ChangeEvent<HTMLInputElement>) => 
           labReport: 'success' 
         }));
       }
-      
-      // Update form data with all available paths/hashes
+
+      // Update form data with available paths/hashes
       setFormData(prev => ({
         ...prev,
         labReport: file,
@@ -687,31 +716,36 @@ const handleLabReportUpload = async (e: React.ChangeEvent<HTMLInputElement>) => 
         labReportUrl: result.filePath,
         ...(result.IpfsHash && { labReportIpfsHash: result.IpfsHash })
       }));
-      
+
       // Auto-verify the uploaded file
       await verifyDocument(file, 'labReport');
+
+      // ✅ Now you can use labReportIpfsHash here (send to smart contract, etc.)
+      if (labReportIpfsHash) {
+        console.log("Stored IPFS hash in variable:", labReportIpfsHash);
+        // e.g. call saveHashToContract(fileId, labReportIpfsHash);
+      }
+
     } else {
       throw new Error(result.error || 'Upload failed');
     }
   } catch (error) {
     console.error('Error uploading file:', error);
-    
-    // Set IPFS upload status to error
+
     setIpfsUploadStatus(prev => ({ 
       ...prev, 
       labReport: 'error' 
     }));
     
-    // Set verification status to failed on upload error
     setVerificationStatus(prev => ({
       ...prev,
       labReport: 'failed'
     }));
     
-    // Show user-friendly error message
     alert('File upload failed: ' + (error as Error).message);
   }
 };
+
 
 
    const getTokensNeededForJar = (jar: JarDefinition) => {
@@ -729,6 +763,9 @@ const handleLabReportUpload = async (e: React.ChangeEvent<HTMLInputElement>) => 
 const getTotalTokensNeeded = () => {
   return batchJars.reduce((sum, jar) => sum + getTokensNeededForJar(jar), 0);
 };
+   
+
+
 
   return (
   <div className="fixed inset-0 bg-black bg-opacity-50 flex justify-center items-center z-50">
@@ -1084,7 +1121,11 @@ const getTotalTokensNeeded = () => {
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   Max: {getMaxQuantity()} jars
+                  
+                
                 </p>
+
+
               </div>
 
               {/* Weight Preview */}
