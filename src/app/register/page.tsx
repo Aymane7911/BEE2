@@ -1,26 +1,14 @@
 'use client';
 
-import { useState, useEffect, Suspense, ChangeEvent } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Web3 from 'web3';
 import { contractABI, contractAddress } from '../../contractsinfo';
 import { useSearchParams } from 'next/navigation';
+import { useEffect } from 'react';
 
-// Define types for form data
-interface FormData {
-  firstname: string;
-  lastname: string;
-  email: string;
-  phonenumber: string;
-  password: string;
-  confirmPassword: string;
-  role: string;
-  useEmail: boolean;
-}
-
-// Create a separate component for the search params logic
-function AdminRegistrationWithSearchParams() {
-  const [formData, setFormData] = useState<FormData>({
+export default function AdminRegistrationPage() {
+  const [formData, setFormData] = useState({
     firstname: '',
     lastname: '',
     email: '',
@@ -30,30 +18,30 @@ function AdminRegistrationWithSearchParams() {
     role: 'admin', // Default role
     useEmail: true,
   });
-  
   const web3 = new Web3("http://127.0.0.1:8545");
-  const contract = new web3.eth.Contract(contractABI, process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT || '');
+  const contract = new web3.eth.Contract(contractABI, process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT);
 
-  const [otpStep, setOtpStep] = useState<boolean>(false);
-  const [otp, setOtp] = useState<string>('');
-  const [otpSent, setOtpSent] = useState<boolean>(false);
-  const [resendCooldown, setResendCooldown] = useState<number>(0);
-  const [tempRegistrationData, setTempRegistrationData] = useState<FormData | null>(null);
+  const [otpStep, setOtpStep] = useState(false);
+  const [otp, setOtp] = useState('');
+  const [otpSent, setOtpSent] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [tempRegistrationData, setTempRegistrationData] = useState<typeof formData | null>(null);
 
-  const handleOtpChange = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleOtpChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value.replace(/[^0-9]/g, '');
     if (value.length <= 6) {
       setOtp(value);
     }
   };
 
-  const [error, setError] = useState<string>('');
-  const [success, setSuccess] = useState<string>('');
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
-  const searchParams = useSearchParams();
 
-  const handleChange = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+  const handleChange = (
+    e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
+  ) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
   };
@@ -62,38 +50,37 @@ function AdminRegistrationWithSearchParams() {
     setFormData(prev => ({ ...prev, useEmail: !prev.useEmail }));
   };
 
-  const handleGoogleAuth = async () => {
-    try {
-      setIsLoading(true);
-      setError('');
-      
-      // Build the Google OAuth URL with proper parameters
-      const baseUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
-      const params = new URLSearchParams({
-        client_id: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '',
-        redirect_uri: `${window.location.origin}/api/auth/google/callback`,
-        response_type: 'code',
-        scope: 'email profile openid',
-        access_type: 'offline',
-        prompt: 'consent',
-        state: JSON.stringify({
-          type: 'admin',
-          redirectTo: '/admin/dashboard'
-        })
-      });
-      
-      const googleAuthUrl = `${baseUrl}?${params.toString()}`;
-      
-      // Redirect to Google OAuth
-      window.location.href = googleAuthUrl;
-      
-    } catch (err) {
-      console.error('Google OAuth error:', err);
-      setError('Failed to initialize Google authentication.');
-      setIsLoading(false);
-    }
-  };
-
+const handleGoogleAuth = async () => {
+  try {
+    setIsLoading(true);
+    setError('');
+    
+    // Build the Google OAuth URL with proper parameters
+    const baseUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+    const params = new URLSearchParams({
+      client_id: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '',
+      redirect_uri: `${window.location.origin}/api/auth/google/callback`,
+      response_type: 'code',
+      scope: 'email profile openid',
+      access_type: 'offline',
+      prompt: 'consent',
+      state: JSON.stringify({
+        type: 'admin',
+        redirectTo: '/admin/dashboard'
+      })
+    });
+    
+    const googleAuthUrl = `${baseUrl}?${params.toString()}`;
+    
+    // Redirect to Google OAuth
+    window.location.href = googleAuthUrl;
+    
+  } catch (err) {
+    console.error('Google OAuth error:', err);
+    setError('Failed to initialize Google authentication.');
+    setIsLoading(false);
+  }
+};
   const sendOtp = async (phoneNumber: string) => {
     try {
       const response = await fetch('/api/send-otp', {
@@ -127,7 +114,7 @@ function AdminRegistrationWithSearchParams() {
     }
   };
 
-  const verifyOtp = async (phoneNumber: string, otp: string): Promise<boolean> => {
+  const verifyOtp = async (phoneNumber: string, otp: string) => {
     try {
       const response = await fetch('/api/verify-otp', {
         method: 'POST',
@@ -144,41 +131,43 @@ function AdminRegistrationWithSearchParams() {
       return false;
     }
   };
+  
+  const searchParams = useSearchParams();
 
-  useEffect(() => {
-    // Check for OAuth error
-    const error = searchParams.get('error');
-    const message = searchParams.get('message');
-    
-    if (error) {
-      setIsLoading(false);
-      switch (error) {
-        case 'oauth_error':
-          setError(`Google OAuth error: ${message || 'Authentication failed'}`);
-          break;
-        case 'no_code':
-          setError('Authorization was cancelled or failed');
-          break;
-        case 'server_error':
-          setError(`Server error: ${message || 'Please try again'}`);
-          break;
-        default:
-          setError('Authentication failed. Please try again.');
-      }
+useEffect(() => {
+  // Check for OAuth error
+  const error = searchParams.get('error');
+  const message = searchParams.get('message');
+  
+  if (error) {
+    setIsLoading(false);
+    switch (error) {
+      case 'oauth_error':
+        setError(`Google OAuth error: ${message || 'Authentication failed'}`);
+        break;
+      case 'no_code':
+        setError('Authorization was cancelled or failed');
+        break;
+      case 'server_error':
+        setError(`Server error: ${message || 'Please try again'}`);
+        break;
+      default:
+        setError('Authentication failed. Please try again.');
     }
+  }
+  
+  // Check for success (if the redirect goes to this page instead of dashboard)
+  const authSuccess = searchParams.get('auth_success');
+  if (authSuccess === 'true') {
+    const userEmail = searchParams.get('user_email');
+    setSuccess(`Authentication successful! Welcome ${userEmail}`);
     
-    // Check for success (if the redirect goes to this page instead of dashboard)
-    const authSuccess = searchParams.get('auth_success');
-    if (authSuccess === 'true') {
-      const userEmail = searchParams.get('user_email');
-      setSuccess(`Authentication successful! Welcome ${userEmail}`);
-      
-      // Redirect to dashboard after a brief delay
-      setTimeout(() => {
-        router.push('/admin/dashboard');
-      }, 2000);
-    }
-  }, [searchParams, router]);
+    // Redirect to dashboard after a brief delay
+    setTimeout(() => {
+      router.push('/admin/dashboard');
+    }, 2000);
+  }
+}, [searchParams, router]);
 
   const handleSubmit = async () => {
     setError('');
@@ -298,7 +287,7 @@ function AdminRegistrationWithSearchParams() {
     }
   };
 
-  function generateRandomInt(): number {
+  function generateRandomInt() {
     return Math.floor(Math.random() * 1000); // example range: 0–999
   }
 
@@ -317,7 +306,7 @@ function AdminRegistrationWithSearchParams() {
       const maxFee = (BigInt(baseFee) + BigInt(priorityFee)).toString();
 
       const tx = {
-        from: process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT || '',
+        from: process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT,
         to: contractAddress,
         data: txData,
         gas: 2000000,
@@ -325,14 +314,8 @@ function AdminRegistrationWithSearchParams() {
         maxPriorityFeePerGas: priorityFee,
       };
 
-      // Check if private key exists before using it
-      const privateKey = process.env.NEXT_PUBLIC_HARDHAT_PRIVATE_KEY;
-      if (!privateKey) {
-        throw new Error('Private key not found in environment variables');
-      }
-
       // Sign transaction with fixed account's private key
-      const signedTx = await web3.eth.accounts.signTransaction(tx, privateKey);
+      const signedTx = await web3.eth.accounts.signTransaction(tx, process.env.NEXT_PUBLIC_HARDHAT_PRIVATE_KEY!);
 
       // Send transaction
       const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
@@ -568,6 +551,7 @@ function AdminRegistrationWithSearchParams() {
                         className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
                         required
                       />
+                    </div>
 
                     {/* Password Fields */}
                     <div className="space-y-4">
