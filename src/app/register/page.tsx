@@ -568,7 +568,6 @@ function AdminRegistrationWithSearchParams() {
                         className="w-full pl-12 pr-4 py-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-300"
                         required
                       />
-                    </div>
 
                     {/* Password Fields */}
                     <div className="space-y-4">
