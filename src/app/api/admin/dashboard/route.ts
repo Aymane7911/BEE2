@@ -1,4 +1,4 @@
-// app/api/admin/dashboard/route.ts - Schema-per-Tenant Version
+// app/api/admin/dashboard/route.ts - Fixed Cookie Name Issue
 import { NextRequest, NextResponse } from 'next/server';
 import { PrismaClient } from '@prisma/client';
 import { getMasterPrismaClient } from '@/lib/prisma-manager';
@@ -114,8 +114,8 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
     const cookies = request.cookies;
     console.log('Available cookies:', cookies.getAll().map(c => ({ name: c.name, hasValue: !!c.value })));
     
-    // Try multiple cookie names for the admin token
-    const adminTokenNames = ['admin-token', 'admin_token', 'adminToken'];
+    // FIXED: Include 'token' in the list of cookie names to check
+    const adminTokenNames = ['token', 'admin-token', 'admin_token', 'adminToken'];
     let adminToken: string | undefined;
     
     for (const tokenName of adminTokenNames) {
@@ -158,13 +158,15 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
         adminId: decoded.adminId,
         email: decoded.email,
         role: decoded.role,
-        schemaName: decoded.schemaName || decoded.databaseId // Support both for migration
+        schemaName: decoded.schemaName || decoded.databaseId, // Support both for migration
+        isAdmin: decoded.isAdmin // ADDED: Include isAdmin flag from JWT
       };
       
       console.log('JWT decoded successfully:', {
         adminId: adminSession.adminId,
         email: adminSession.email,
         schemaName: adminSession.schemaName,
+        isAdmin: adminSession.isAdmin,
         hasSchemaName: !!decoded.schemaName,
         hasDatabaseId: !!decoded.databaseId,
         decodedKeys: Object.keys(decoded)
@@ -331,6 +333,7 @@ export async function GET(request: NextRequest): Promise<NextResponse<DashboardD
     }
 
     // Get admin user details from beeusers table (if exists)
+    // FIXED: Use proper query for finding admin user in schema
     const adminUser = await schemaPrisma.beeusers.findFirst({
       where: {
         email: adminRecord.email,

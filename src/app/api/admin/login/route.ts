@@ -1,4 +1,4 @@
-// app/api/admin/login/route.ts - Schema-per-Tenant Version
+// app/api/admin/login/route.ts - Unified Authentication Version
 import { NextRequest, NextResponse } from 'next/server';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
@@ -6,8 +6,23 @@ import jwt from 'jsonwebtoken';
 import { getMasterPrismaClient } from '@/lib/prisma-manager';
 
 interface LoginRequest {
+  // Email/Password login
+  email?: string;
+  password?: string;
+  authType: 'email_password' | 'google' | 'google_verify_session';
+  
+  // Google OAuth login
+  googleAuthCode?: string;
+}
+
+interface GoogleUserInfo {
+  id: string;
   email: string;
-  password: string;
+  name: string;
+  given_name: string;
+  family_name: string;
+  picture: string;
+  verified_email: boolean;
 }
 
 interface LoginResponse {
@@ -57,7 +72,7 @@ function generateAdminToken(admin: any): string {
     adminId: admin.id,
     email: admin.email,
     role: admin.role,
-    schemaName: admin.schemaName, // ✅ Use schemaName (new system)
+    schemaName: admin.schemaName,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
   };
@@ -65,14 +80,175 @@ function generateAdminToken(admin: any): string {
   return jwt.sign(tokenPayload, jwtSecret);
 }
 
-// Login admin function
-async function loginAdminWithSchema(email: string, password: string) {
-  console.log('🔐 Attempting admin login for:', email);
+// Exchange Google auth code for user info
+async function getGoogleUserInfo(authCode: string): Promise<GoogleUserInfo> {
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const redirectUri = `${process.env.NEXTAUTH_URL || process.env.NEXT_PUBLIC_APP_URL}/api/auth/google/callback`;
+
+  if (!clientId || !clientSecret) {
+    throw new Error('Google OAuth not configured');
+  }
+
+  // Exchange code for access token
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      code: authCode,
+      grant_type: 'authorization_code',
+      redirect_uri: redirectUri,
+    }),
+  });
+
+  const tokenData = await tokenResponse.json();
+  
+  if (!tokenResponse.ok) {
+    throw new Error(`Token exchange failed: ${tokenData.error_description || 'Unknown error'}`);
+  }
+
+  // Get user info using access token
+  const userResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+    headers: {
+      Authorization: `Bearer ${tokenData.access_token}`,
+    },
+  });
+
+  const userData = await userResponse.json();
+  
+  if (!userResponse.ok) {
+    throw new Error(`User info fetch failed: ${userData.error?.message || 'Unknown error'}`);
+  }
+
+  return userData;
+}
+
+// Login admin with email/password
+async function loginAdminWithCredentials(email: string, password: string) {
+  console.log('🔐 Attempting email/password login for:', email);
   
   const masterPrisma = getMasterPrismaClient();
   
+  const adminRecord = await masterPrisma.admin.findUnique({
+    where: { email: email.toLowerCase() },
+    select: {
+      id: true,
+      firstname: true,
+      lastname: true,
+      email: true,
+      password: true,
+      role: true,
+      schemaName: true,
+      displayName: true,
+      description: true,
+      isActive: true,
+      createdAt: true
+    }
+  });
+
+  if (!adminRecord) {
+    throw new Error('Invalid email or password');
+  }
+
+  if (!adminRecord.isActive) {
+    throw new Error('Account is inactive');
+  }
+
+  // Verify password
+  const passwordValid = await bcrypt.compare(password, adminRecord.password);
+  if (!passwordValid) {
+    throw new Error('Invalid email or password');
+  }
+
+  if (!adminRecord.schemaName) {
+    throw new Error('No schema associated with admin account');
+  }
+
+  return adminRecord;
+}
+
+// Login admin with Google OAuth
+async function loginAdminWithGoogle(googleAuthCode: string) {
+  console.log('🔐 Attempting Google OAuth login');
+  
+  // Get user info from Google
+  const googleUser = await getGoogleUserInfo(googleAuthCode);
+  
+  if (!googleUser.verified_email) {
+    throw new Error('Google email not verified');
+  }
+  
+  const masterPrisma = getMasterPrismaClient();
+  
+  // Find admin by Google email
+  const adminRecord = await masterPrisma.admin.findUnique({
+    where: { email: googleUser.email.toLowerCase() },
+    select: {
+      id: true,
+      firstname: true,
+      lastname: true,
+      email: true,
+      password: true,
+      role: true,
+      schemaName: true,
+      displayName: true,
+      description: true,
+      isActive: true,
+      createdAt: true
+    }
+  });
+
+  if (!adminRecord) {
+    throw new Error('No admin account found for this Google account');
+  }
+
+  if (!adminRecord.isActive) {
+    throw new Error('Account is inactive');
+  }
+
+  if (!adminRecord.schemaName) {
+    throw new Error('No schema associated with admin account');
+  }
+
+  console.log('✅ Google OAuth login successful:', {
+    id: adminRecord.id,
+    email: adminRecord.email,
+    schemaName: adminRecord.schemaName
+  });
+
+  return adminRecord;
+}
+
+// Verify existing session (for Google OAuth callback)
+async function verifyExistingSession(email: string, request: NextRequest) {
+  console.log('🔐 Verifying existing session for:', email);
+  
+  // Check if there's already a valid token in httpOnly cookie
+  const adminToken = request.cookies.get('admin-token');
+  
+  if (!adminToken) {
+    throw new Error('No active session found');
+  }
+
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    throw new Error('JWT_SECRET not configured');
+  }
+
   try {
-    // Find admin in master database
+    const decoded = jwt.verify(adminToken.value, jwtSecret) as any;
+    
+    if (decoded.email !== email.toLowerCase()) {
+      throw new Error('Session email mismatch');
+    }
+
+    const masterPrisma = getMasterPrismaClient();
+    
+    // Get fresh admin data
     const adminRecord = await masterPrisma.admin.findUnique({
       where: { email: email.toLowerCase() },
       select: {
@@ -80,69 +256,45 @@ async function loginAdminWithSchema(email: string, password: string) {
         firstname: true,
         lastname: true,
         email: true,
-        password: true,
         role: true,
         schemaName: true,
         displayName: true,
         description: true,
-        isActive: true,
-        createdAt: true
+        isActive: true
       }
     });
 
-    if (!adminRecord) {
-      console.log('❌ Admin not found:', email);
-      throw new Error('Invalid email or password');
+    if (!adminRecord || !adminRecord.isActive) {
+      throw new Error('Admin account not found or inactive');
     }
 
-    if (!adminRecord.isActive) {
-      console.log('❌ Admin account inactive:', email);
-      throw new Error('Account is inactive');
-    }
-
-    // Verify password
-    const passwordValid = await bcrypt.compare(password, adminRecord.password);
-    if (!passwordValid) {
-      console.log('❌ Invalid password for:', email);
-      throw new Error('Invalid email or password');
-    }
-
-    // Check if schema name exists
-    if (!adminRecord.schemaName) {
-      console.log('❌ No schema associated with admin:', email);
-      throw new Error('No schema associated with admin account');
-    }
-
-    console.log('✅ Admin login successful:', {
-      id: adminRecord.id,
-      email: adminRecord.email,
-      schemaName: adminRecord.schemaName
-    });
-
-    // Generate JWT token
-    const token = generateAdminToken(adminRecord);
-
-    return {
-      token,
-      admin: {
-        id: adminRecord.id,
-        firstname: adminRecord.firstname,
-        lastname: adminRecord.lastname,
-        email: adminRecord.email,
-        role: adminRecord.role,
-        schemaName: adminRecord.schemaName
-      },
-      schema: {
-        name: adminRecord.schemaName,
-        displayName: adminRecord.displayName || `${adminRecord.firstname} ${adminRecord.lastname}'s Workspace`,
-        description: adminRecord.description || undefined
-      }
-    };
-
+    return adminRecord;
+    
   } catch (error) {
-    console.error('Login error:', error);
-    throw error;
+    throw new Error('Invalid or expired session');
   }
+}
+
+// Common function to create login response
+function createLoginResponse(adminRecord: any) {
+  const token = generateAdminToken(adminRecord);
+
+  return {
+    token,
+    admin: {
+      id: adminRecord.id,
+      firstname: adminRecord.firstname,
+      lastname: adminRecord.lastname,
+      email: adminRecord.email,
+      role: adminRecord.role,
+      schemaName: adminRecord.schemaName
+    },
+    schema: {
+      name: adminRecord.schemaName,
+      displayName: adminRecord.displayName || `${adminRecord.firstname} ${adminRecord.lastname}'s Workspace`,
+      description: adminRecord.description || undefined
+    }
+  };
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<LoginResponse>> {
@@ -162,36 +314,77 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
 
   try {
     const body: LoginRequest = await request.json();
-    const { email, password } = body;
+    const { email, password, authType, googleAuthCode } = body;
 
-    // Validation
-    if (!email || !password) {
-      return NextResponse.json<LoginResponse>(
-        { success: false, error: 'Email and password are required' },
-        { status: 400 }
-      );
+    let adminRecord: any;
+    let loginResult: any;
+
+    // Handle different authentication types
+    switch (authType) {
+      case 'email_password':
+        // Standard email/password login
+        if (!email || !password) {
+          return NextResponse.json<LoginResponse>(
+            { success: false, error: 'Email and password are required' },
+            { status: 400 }
+          );
+        }
+
+        if (!email.includes('@')) {
+          return NextResponse.json<LoginResponse>(
+            { success: false, error: 'Please enter a valid email address' },
+            { status: 400 }
+          );
+        }
+
+        if (password.length < 3) {
+          return NextResponse.json<LoginResponse>(
+            { success: false, error: 'Password is too short' },
+            { status: 400 }
+          );
+        }
+
+        console.log('📧 Email/password login attempt for:', email);
+        adminRecord = await loginAdminWithCredentials(email.trim().toLowerCase(), password);
+        loginResult = createLoginResponse(adminRecord);
+        break;
+
+      case 'google':
+        // Google OAuth login
+        if (!googleAuthCode) {
+          return NextResponse.json<LoginResponse>(
+            { success: false, error: 'Google authentication code is required' },
+            { status: 400 }
+          );
+        }
+
+        console.log('📧 Google OAuth login attempt');
+        adminRecord = await loginAdminWithGoogle(googleAuthCode);
+        loginResult = createLoginResponse(adminRecord);
+        break;
+
+      case 'google_verify_session':
+        // Verify existing Google session
+        if (!email) {
+          return NextResponse.json<LoginResponse>(
+            { success: false, error: 'Email is required for session verification' },
+            { status: 400 }
+          );
+        }
+
+        console.log('📧 Google session verification for:', email);
+        adminRecord = await verifyExistingSession(email.trim().toLowerCase(), request);
+        loginResult = createLoginResponse(adminRecord);
+        break;
+
+      default:
+        return NextResponse.json<LoginResponse>(
+          { success: false, error: 'Invalid authentication type' },
+          { status: 400 }
+        );
     }
 
-    if (!email.includes('@')) {
-      return NextResponse.json<LoginResponse>(
-        { success: false, error: 'Please enter a valid email address' },
-        { status: 400 }
-      );
-    }
-
-    if (password.length < 3) {
-      return NextResponse.json<LoginResponse>(
-        { success: false, error: 'Password is too short' },
-        { status: 400 }
-      );
-    }
-
-    console.log('📧 Login attempt for email:', email);
-
-    // Attempt login with new schema system
-    const loginResult = await loginAdminWithSchema(email.trim().toLowerCase(), password);
-
-    console.log('✅ Login successful for:', email);
+    console.log('✅ Login successful for:', adminRecord.email);
 
     // Create response
     const response = NextResponse.json<LoginResponse>({
@@ -204,7 +397,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
     response.cookies.set('admin-token', loginResult.token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax', // Changed from 'strict' to 'lax' for better compatibility
+      sameSite: 'lax',
       maxAge: 24 * 60 * 60, // 24 hours
       path: '/',
     });
@@ -231,6 +424,20 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
       );
     }
 
+    if (error.message.includes('No admin account found for this Google account')) {
+      return NextResponse.json<LoginResponse>(
+        { success: false, error: 'No admin account found for this Google account. Please use email/password login or contact support.' },
+        { status: 404 }
+      );
+    }
+
+    if (error.message.includes('Google email not verified')) {
+      return NextResponse.json<LoginResponse>(
+        { success: false, error: 'Google email not verified. Please verify your email with Google first.' },
+        { status: 400 }
+      );
+    }
+
     if (error.message.includes('No schema associated')) {
       return NextResponse.json<LoginResponse>(
         { success: false, error: 'Account configuration incomplete. Please contact support.' },
@@ -238,10 +445,27 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
       );
     }
 
-    if (error.message.includes('JWT_SECRET not configured')) {
+    if (error.message.includes('JWT_SECRET not configured') || 
+        error.message.includes('Google OAuth not configured')) {
       return NextResponse.json<LoginResponse>(
         { success: false, error: 'Authentication service misconfigured. Please contact support.' },
         { status: 500 }
+      );
+    }
+
+    if (error.message.includes('Token exchange failed') || 
+        error.message.includes('User info fetch failed')) {
+      return NextResponse.json<LoginResponse>(
+        { success: false, error: 'Google authentication failed. Please try again.' },
+        { status: 400 }
+      );
+    }
+
+    if (error.message.includes('No active session found') || 
+        error.message.includes('Invalid or expired session')) {
+      return NextResponse.json<LoginResponse>(
+        { success: false, error: 'Session expired. Please sign in again.' },
+        { status: 401 }
       );
     }
 
@@ -257,7 +481,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
 
     // Generic error
     return NextResponse.json<LoginResponse>(
-      { success: false, error: 'Login failed. Please try again.' },
+      { success: false, error: 'Authentication failed. Please try again.' },
       { status: 500 }
     );
   }

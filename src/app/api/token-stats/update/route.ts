@@ -21,8 +21,8 @@ export async function GET(request: NextRequest) {
     }
 
     // Extract userId and schemaName from the auth result
-    const userId = typeof authResult === 'object' && authResult !== null ? authResult.userId : authResult;
-    const schemaName = typeof authResult === 'object' && authResult !== null ? authResult.schemaName : null;
+    const userId = authResult.userId;
+    const schemaName = authResult.schemaName;
     
     console.log(`[${requestId}] ▶ Authenticated user ID:`, userId, 'Schema:', schemaName);
 

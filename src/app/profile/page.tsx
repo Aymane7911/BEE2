@@ -168,8 +168,7 @@ interface UserProfile {
     // Add index signature for verificationStatus too
     [key: string]: boolean;
   };
-  // Computed full name
-  get fullName(): string;
+ 
 }
 
 const ProfilePage = () => {

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 
 export default function AdminLoginPage() {
   const [credentials, setCredentials] = useState({
@@ -10,8 +11,11 @@ export default function AdminLoginPage() {
   });
 
   const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   // Decode JWT manually
   const decodeJWT = (token: string) => {
@@ -25,6 +29,32 @@ export default function AdminLoginPage() {
     }
   };
 
+  // Unified login success handler
+  const handleLoginSuccess = (loginData: any) => {
+    const token = loginData.token;
+    const admin = loginData.admin;
+    
+    if (token) {
+      localStorage.setItem('token', token);
+      
+      if (admin) {
+        localStorage.setItem('adminInfo', JSON.stringify(admin));
+      }
+      
+      setSuccessMessage(`Welcome back, ${admin?.firstname || 'Admin'}!`);
+      
+      setTimeout(() => {
+        router.push('/admin/dashboard');
+      }, 1500);
+      
+      setErrorMessage('');
+      return true;
+    } else {
+      setErrorMessage('Authentication failed. Please try again.');
+      return false;
+    }
+  };
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (token) {
@@ -32,6 +62,7 @@ export default function AdminLoginPage() {
       const currentTime = Date.now() / 1000;
       if (!decoded || decoded.exp < currentTime) {
         localStorage.removeItem('token');
+        localStorage.removeItem('adminInfo');
       } else {
         // Redirect to admin dashboard if already logged in
         if (decoded.role === 'admin' || decoded.role === 'super_admin') {
@@ -39,7 +70,102 @@ export default function AdminLoginPage() {
         }
       }
     }
-  }, [router]);
+
+    // Handle Google OAuth callback results
+    const handleOAuthCallback = async () => {
+      const error = searchParams.get('error');
+      const googleAuthSuccess = searchParams.get('google_auth_success');
+      const userEmail = searchParams.get('user_email');
+      const authCode = searchParams.get('code'); // Google returns 'code' parameter
+      
+      if (error) {
+        setIsLoading(false);
+        setIsGoogleLoading(false);
+        switch (error) {
+          case 'oauth_error':
+            setErrorMessage('Google OAuth authentication failed');
+            break;
+          case 'no_code':
+            setErrorMessage('Authorization was cancelled or failed');
+            break;
+          case 'server_error':
+            setErrorMessage('Server error during authentication. Please try again.');
+            break;
+          case 'admin_not_found':
+            setErrorMessage('No admin account found for this Google account. Please use email/password login or contact support.');
+            break;
+          case 'account_inactive':
+            setErrorMessage('Your admin account is inactive. Please contact support.');
+            break;
+          default:
+            setErrorMessage('Authentication failed. Please try again.');
+        }
+        return;
+      }
+
+      // Handle Google OAuth success with auth code
+      if (authCode && !googleAuthSuccess) {
+        try {
+          setIsGoogleLoading(true);
+          setErrorMessage('');
+          
+          // Send the auth code to your login endpoint for processing
+          const response = await fetch('/api/admin/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include', // Include cookies
+            body: JSON.stringify({
+              googleAuthCode: authCode,
+              authType: 'google'
+            }),
+          });
+
+          const result = await response.json();
+
+          if (response.ok && result.success) {
+            handleLoginSuccess(result.data);
+          } else {
+            setErrorMessage(result.error || 'Google authentication failed');
+          }
+        } catch (error) {
+          console.error('Google OAuth processing error:', error);
+          setErrorMessage('Failed to process Google authentication');
+        } finally {
+          setIsGoogleLoading(false);
+        }
+      }
+      
+      // Handle direct success from callback (if your callback already processed everything)
+      else if (googleAuthSuccess === 'true' && userEmail) {
+        setSuccessMessage(`Google authentication successful! Welcome ${userEmail}`);
+        
+        // Try to get the token from httpOnly cookie via your login endpoint
+        try {
+          const response = await fetch('/api/admin/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              authType: 'google_verify_session',
+              email: userEmail
+            }),
+          });
+          
+          const result = await response.json();
+          if (response.ok && result.success) {
+            handleLoginSuccess(result.data);
+          } else {
+            setErrorMessage('Failed to retrieve session. Please try logging in again.');
+          }
+        } catch (error) {
+          console.error('Session verification error:', error);
+          setErrorMessage('Session verification failed. Please try logging in again.');
+        }
+      }
+    };
+
+    handleOAuthCallback();
+  }, [router, searchParams]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -55,27 +181,17 @@ export default function AdminLoginPage() {
       const res = await fetch('/api/admin/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(credentials),
+        credentials: 'include', // Include cookies
+        body: JSON.stringify({
+          ...credentials,
+          authType: 'email_password'
+        }),
       });
 
       const result = await res.json();
 
       if (res.ok && result.success) {
-        const token = result.data?.token;
-        
-        if (token) {
-          localStorage.setItem('token', token);
-          
-          // Store additional admin info if available
-          if (result.data?.admin) {
-            localStorage.setItem('adminInfo', JSON.stringify(result.data.admin));
-          }
-          
-          router.push('/admin/dashboard');
-          setErrorMessage('');
-        } else {
-          setErrorMessage('Token not received. Please try again.');
-        }
+        handleLoginSuccess(result.data);
       } else {
         setErrorMessage(result.error || result.message || 'Invalid login credentials. Try again.');
       }
@@ -84,6 +200,38 @@ export default function AdminLoginPage() {
       setErrorMessage('An unexpected error occurred. Please try again.');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleGoogleAuth = async () => {
+    try {
+      setIsGoogleLoading(true);
+      setErrorMessage('');
+      
+      // Create Google OAuth URL with admin-specific state
+      const baseUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+      const params = new URLSearchParams({
+        client_id: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '',
+        redirect_uri: `${window.location.origin}/api/auth/google/callback`,
+        response_type: 'code',
+        scope: 'email profile openid',
+        access_type: 'offline',
+        prompt: 'consent',
+        state: JSON.stringify({
+          type: 'admin_login',
+          redirectTo: '/admin/dashboard' // Redirect back to login page for processing
+        })
+      });
+      
+      const googleAuthUrl = `${baseUrl}?${params.toString()}`;
+      
+      // Redirect to Google OAuth
+      window.location.href = googleAuthUrl;
+      
+    } catch (err) {
+      console.error('Google OAuth error:', err);
+      setErrorMessage('Failed to initialize Google authentication.');
+      setIsGoogleLoading(false);
     }
   };
 
@@ -180,6 +328,47 @@ export default function AdminLoginPage() {
                 </div>
               )}
 
+              {/* Success Message */}
+              {successMessage && (
+                <div className="relative overflow-hidden bg-green-50 border border-green-200 rounded-xl p-4 animate-slide-down mb-6">
+                  <div className="flex items-center">
+                    <svg className="h-5 w-5 text-green-400 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <p className="text-green-700 text-sm font-medium">{successMessage}</p>
+                  </div>
+                  <div className="absolute bottom-0 left-0 w-full h-1 bg-gradient-to-r from-green-400 to-green-500 animate-pulse"></div>
+                </div>
+              )}
+
+              {/* Google Sign-In Button */}
+              <div className="mb-6">
+                <button
+                  type="button"
+                  onClick={handleGoogleAuth}
+                  disabled={isGoogleLoading || isLoading}
+                  className="w-full flex items-center justify-center gap-3 bg-white text-gray-800 hover:bg-gray-100 border border-gray-200 font-semibold py-4 rounded-xl transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-[1.02] hover:-translate-y-1 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
+                >
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                  </svg>
+                  {isGoogleLoading ? 'Processing...' : 'Sign in with Google'}
+                </button>
+              </div>
+
+              {/* Divider */}
+              <div className="relative my-6">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-gray-300"></div>
+                </div>
+                <div className="relative flex justify-center text-sm">
+                  <span className="px-4 bg-white text-gray-500">Or continue with email</span>
+                </div>
+              </div>
+
               {/* Form */}
               <div className="space-y-6">
                 {/* Email Input */}
@@ -196,7 +385,8 @@ export default function AdminLoginPage() {
                     value={credentials.email}
                     onChange={handleChange}
                     required
-                    className="w-full pl-12 pr-4 py-4 bg-gray-50/80 backdrop-blur-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:border-transparent transition-all duration-300 text-gray-800 placeholder-gray-500 focus:ring-blue-500"
+                    disabled={isLoading || isGoogleLoading}
+                    className="w-full pl-12 pr-4 py-4 bg-gray-50/80 backdrop-blur-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:border-transparent transition-all duration-300 text-gray-800 placeholder-gray-500 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                   />
                 </div>
 
@@ -214,7 +404,8 @@ export default function AdminLoginPage() {
                     value={credentials.password}
                     onChange={handleChange}
                     required
-                    className="w-full pl-12 pr-4 py-4 bg-gray-50/80 backdrop-blur-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:border-transparent transition-all duration-300 text-gray-800 placeholder-gray-500 focus:ring-blue-500"
+                    disabled={isLoading || isGoogleLoading}
+                    className="w-full pl-12 pr-4 py-4 bg-gray-50/80 backdrop-blur-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:border-transparent transition-all duration-300 text-gray-800 placeholder-gray-500 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                   />
                 </div>
 
@@ -222,25 +413,27 @@ export default function AdminLoginPage() {
                 <button
                   type="button"
                   onClick={handleLogin}
-                  disabled={isLoading}
-                  className="relative w-full py-4 rounded-xl font-bold text-lg text-white shadow-xl transform transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none group overflow-hidden bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700"
+                  disabled={isLoading || isGoogleLoading}
+                  className="w-full py-4 px-6 rounded-xl font-semibold text-white transition-all duration-300 transform hover:scale-[1.02] hover:-translate-y-1 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none shadow-lg hover:shadow-xl bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-600 hover:to-indigo-700"
                 >
-                  {/* Loading Animation */}
-                  <div className={`absolute inset-0 bg-gradient-to-r transition-opacity duration-300 ${
-                    isLoading ? 'opacity-100' : 'opacity-0'
-                  } from-blue-700 via-indigo-600 to-blue-700`}>
-                    <div className="absolute inset-0 flex items-center justify-center">
-                      <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
-                    </div>
+                  <div className="flex items-center justify-center">
+                    {isLoading ? (
+                      <>
+                        <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Signing In...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1" />
+                        </svg>
+                        Admin Sign In
+                      </>
+                    )}
                   </div>
-
-                  {/* Button Content */}
-                  <span className={`transition-opacity duration-300 ${isLoading ? 'opacity-0' : 'opacity-100'}`}>
-                    🛡️ Admin Sign In
-                  </span>
-
-                  {/* Shine Effect */}
-                  <div className="absolute inset-0 -skew-x-12 bg-gradient-to-r from-transparent via-white/20 to-transparent transform translate-x-[-100%] group-hover:translate-x-[200%] transition-transform duration-700"></div>
                 </button>
               </div>
             </div>

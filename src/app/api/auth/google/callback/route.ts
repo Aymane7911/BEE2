@@ -1,41 +1,145 @@
-// app/api/auth/google/callback/route.ts
+// app/api/auth/google/callback/route.ts - Fixed Admin Authentication
 
 import { NextResponse } from 'next/server';
-import { Pool } from 'pg';
 import jwt from 'jsonwebtoken';
-
-// Configure the database pool with proper settings for Render
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { 
-    rejectUnauthorized: false 
-  } : false,
-  max: 10, // Reduced pool size for Render
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000, // Increased timeout
-});
+import { PrismaClient } from '@prisma/client';
+import bcrypt from 'bcryptjs';
+import { getMasterPrismaClient } from '@/lib/prisma-manager';
 
 interface GoogleUserData {
   id: string;
   email: string;
   name: string;
+  given_name: string;
+  family_name: string;
   picture?: string;
   verified_email?: boolean;
 }
 
-export async function POST(request: Request) {
+interface AdminOAuthResult {
+  success: boolean;
+  token: string;
+  redirectUrl: string;
+  admin: {
+    id: number;
+    email: string;
+    firstname: string;
+    lastname: string;
+    role: string;
+    schemaName: string;
+  };
+}
+
+// Generate JWT token for admin (matching your login route format)
+function generateAdminToken(admin: any): string {
+  const jwtSecret = process.env.JWT_SECRET;
+  
+  if (!jwtSecret) {
+    throw new Error('JWT_SECRET not configured');
+  }
+
+  const tokenPayload = {
+    adminId: admin.id,
+    email: admin.email,
+    role: admin.role,
+    schemaName: admin.schemaName,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + (24 * 60 * 60) // 24 hours
+  };
+
+  return jwt.sign(tokenPayload, jwtSecret);
+}
+
+// Handle admin Google authentication
+async function handleAdminGoogleAuth(googleUserData: GoogleUserData, redirectTo: string): Promise<AdminOAuthResult> {
+  console.log('[ADMIN AUTH] Processing admin Google authentication for:', googleUserData.email);
+  
+  const masterPrisma = getMasterPrismaClient();
+  
+  try {
+    // Find admin by email
+    const adminRecord = await masterPrisma.admin.findUnique({
+      where: { email: googleUserData.email.toLowerCase() },
+      select: {
+        id: true,
+        firstname: true,
+        lastname: true,
+        email: true,
+        role: true,
+        schemaName: true,
+        displayName: true,
+        description: true,
+        isActive: true,
+      }
+    });
+
+    if (!adminRecord) {
+      throw new Error('No admin account found for this Google account');
+    }
+
+    if (!adminRecord.isActive) {
+      throw new Error('Account is inactive');
+    }
+
+    if (!adminRecord.schemaName) {
+      throw new Error('No schema associated with admin account');
+    }
+
+    console.log('[ADMIN AUTH] ✓ Admin found and validated:', adminRecord.email);
+
+    // Generate JWT token using same logic as login route
+    const token = generateAdminToken(adminRecord);
+
+    return {
+      success: true,
+      token,
+      redirectUrl: redirectTo, // This will now correctly use '/admin/dashboard'
+      admin: {
+        id: adminRecord.id,
+        email: adminRecord.email,
+        firstname: adminRecord.firstname,
+        lastname: adminRecord.lastname,
+        role: adminRecord.role,
+        schemaName: adminRecord.schemaName
+      }
+    };
+
+  } catch (error: any) {
+    console.error('[ADMIN AUTH ERROR]', error.message);
+    throw error;
+  }
+}
+
+async function handleGoogleOAuth(code: string, state?: string): Promise<AdminOAuthResult> {
   console.log('=== GOOGLE OAUTH START ===');
   
   try {
-    // Step 1: Parse request body
-    console.log('[STEP 1] Parsing request body...');
-    const body = await request.json();
+    // Step 1: Parse state parameter - FIX THE REDIRECT URL
+    console.log('[STEP 1] Parsing state parameter...');
+    let authType = 'regular';
+    let redirectTo = '/admin/dashboard'; // DEFAULT TO DASHBOARD, NOT LOGIN
     
-    const { code, redirect_uri } = body;
+    if (state) {
+      try {
+        const stateData = JSON.parse(decodeURIComponent(state));
+        // Fix: Check for both 'type' (from frontend) AND 'userType' (legacy)
+        authType = stateData.type || stateData.userType || 'regular';
+        // FIXED: Always redirect to dashboard for admin, ignore redirectTo from state if it's login page
+        if (authType === 'admin_login') {
+          redirectTo = '/admin/dashboard'; // Force dashboard redirect
+        } else {
+          redirectTo = stateData.redirectTo || '/admin/dashboard';
+        }
+        console.log('[STEP 1] ✓ State parsed:', { authType, redirectTo });
+      } catch (e) {
+        console.log('[STEP 1] Failed to parse state, using dashboard default');
+        redirectTo = '/admin/dashboard'; // Default to dashboard
+      }
+    }
 
     if (!code) {
       console.log('[ERROR] Missing authorization code');
-      return NextResponse.json({ message: 'Authorization code is required' }, { status: 400 });
+      throw new Error('Authorization code is required');
     }
     console.log('[STEP 1] ✓ Authorization code received');
 
@@ -46,18 +150,14 @@ export async function POST(request: Request) {
       'GOOGLE_CLIENT_SECRET', 
       'JWT_SECRET',
       'DATABASE_URL',
-      'NEXT_PUBLIC_SITE_URL',
-      'DEFAULT_DATABASE_ID'
+      'NEXT_PUBLIC_SITE_URL'
     ];
 
     const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
     if (missingVars.length > 0) {
       console.log('[ERROR] Missing environment variables:', missingVars);
-      return NextResponse.json({ 
-        message: 'Server configuration error',
-        missing: missingVars
-      }, { status: 500 });
+      throw new Error(`Server configuration error: ${missingVars.join(', ')}`);
     }
     console.log('[STEP 2] ✓ All environment variables present');
 
@@ -68,7 +168,7 @@ export async function POST(request: Request) {
       client_secret: process.env.GOOGLE_CLIENT_SECRET!,
       code,
       grant_type: 'authorization_code',
-      redirect_uri: redirect_uri || `${process.env.NEXT_PUBLIC_SITE_URL}/api/auth/google/callback`,
+      redirect_uri: `${process.env.NEXT_PUBLIC_SITE_URL}/api/auth/google/callback`,
     };
 
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
@@ -82,10 +182,7 @@ export async function POST(request: Request) {
     if (!tokenResponse.ok) {
       const errorData = await tokenResponse.text();
       console.log('[ERROR] Token exchange failed:', errorData);
-      return NextResponse.json({ 
-        message: 'Failed to exchange code for token',
-        error: errorData
-      }, { status: 400 });
+      throw new Error(`Failed to exchange code for token: ${errorData}`);
     }
 
     const tokenData = await tokenResponse.json();
@@ -102,243 +199,101 @@ export async function POST(request: Request) {
     if (!userResponse.ok) {
       const errorText = await userResponse.text();
       console.log('[ERROR] Failed to fetch user info:', errorText);
-      return NextResponse.json({ 
-        message: 'Failed to fetch user information',
-        error: errorText
-      }, { status: 400 });
+      throw new Error(`Failed to fetch user information: ${errorText}`);
     }
 
     const googleUserData: GoogleUserData = await userResponse.json();
     console.log('[STEP 4] ✓ Google user data received for:', googleUserData.email);
 
-    // Step 5: Test database connection with retries
-    console.log('[STEP 5] Testing database connection...');
-    let dbConnected = false;
-    let dbError = null;
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(`[STEP 5] Database connection attempt ${attempt}/3...`);
-        await pool.query('SELECT NOW()');
-        console.log('[STEP 5] ✓ Database connection successful');
-        dbConnected = true;
-        break;
-      } catch (error: any) {
-        dbError = error;
-        console.log(`[STEP 5] Database connection attempt ${attempt} failed:`, error.message);
-        if (attempt < 3) {
-          await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retry
-        }
-      }
-    }
-
-    if (!dbConnected) {
-      console.log('[ERROR] All database connection attempts failed:', dbError?.message);
-      return NextResponse.json({ 
-        message: 'Database connection error',
-        error: dbError?.message || 'Connection failed after 3 attempts'
-      }, { status: 500 });
-    }
-
-    // Step 6: Get and verify default database ID - FIXED QUERY
-    console.log('[STEP 6] Getting and verifying default database...');
-    let defaultDatabaseId = process.env.DEFAULT_DATABASE_ID!;
-    
-    // First try to get the specific database from env var
-    let databaseResult;
-    try {
-      console.log('[STEP 6] Attempting to use DEFAULT_DATABASE_ID:', defaultDatabaseId);
-      databaseResult = await pool.query(
-        'SELECT id, name, display_name FROM databases WHERE id = $1 AND is_active = TRUE',
-        [defaultDatabaseId]
-      );
-    } catch (error: any) {
-      console.log('[STEP 6] Error querying specific database ID:', error.message);
-    }
-    
-    // If specific database not found or error occurred, get any active database
-    if (!databaseResult || databaseResult.rowCount === 0) {
-      console.log('[STEP 6] Specific database not found, getting any active database...');
-      try {
-        databaseResult = await pool.query(
-          'SELECT id, name, display_name FROM databases WHERE is_active = TRUE ORDER BY created_at ASC LIMIT 1'
-        );
-      } catch (error: any) {
-        console.log('[STEP 6] Error querying active databases:', error.message);
-        // Try without boolean comparison in case of data type issues
-        databaseResult = await pool.query(
-          'SELECT id, name, display_name FROM databases ORDER BY created_at ASC LIMIT 1'
-        );
-      }
-    }
-    
-    if (!databaseResult || databaseResult.rowCount === 0) {
-      console.log('[ERROR] No database found in databases table');
-      console.log('[DEBUG] Checking databases table structure...');
-      
-      // Debug: Check what's actually in the databases table
-      try {
-        const debugResult = await pool.query('SELECT id, name, display_name, is_active FROM databases LIMIT 5');
-        console.log('[DEBUG] Databases found:', debugResult.rows);
-      } catch (debugError: any) {
-        console.log('[DEBUG] Error checking databases table:', debugError.message);
-      }
-
-      return NextResponse.json({ 
-        message: 'No database available',
-        error: 'Database configuration error - no databases found'
-      }, { status: 500 });
-    }
-    
-    // Use the found database
-    defaultDatabaseId = databaseResult.rows[0].id;
-    console.log('[STEP 6] ✓ Using database ID:', defaultDatabaseId);
-    console.log('[STEP 6] ✓ Database name:', databaseResult.rows[0].display_name);
-
-    // Step 7: Check for existing user
-    console.log('[STEP 7] Checking for existing user...');
-    const existingUserResult = await pool.query(
-      'SELECT * FROM beeusers WHERE email = $1 AND database_id = $2', 
-      [googleUserData.email, defaultDatabaseId]
-    );
-    
-    let user;
-
-    if (existingUserResult.rowCount === 0) {
-      console.log('[STEP 8] Creating new user...');
-      // Create new user
-      const nameParts = googleUserData.name.split(' ');
-      const firstname = nameParts[0] || 'Google';
-      const lastname = nameParts.slice(1).join(' ') || 'User';
-
-      const createUserResult = await pool.query(
-        `INSERT INTO beeusers (
-          database_id, firstname, lastname, email, password, 
-          is_confirmed, google_id, role, created_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW()) RETURNING *`,
-        [
-          defaultDatabaseId, 
-          firstname, 
-          lastname, 
-          googleUserData.email, 
-          'google_oauth', 
-          true, 
-          googleUserData.id,
-          'employee'
-        ]
-      );
-
-      user = createUserResult.rows[0];
-      console.log('[STEP 8] ✓ New user created with ID:', user.id);
-      
-      // Initialize TokenStats for new user
-      try {
-        await pool.query(
-          `INSERT INTO "TokenStats" (
-            id, "userId", "totalTokens", "remainingTokens", 
-            "originOnly", "qualityOnly", "bothCertifications", database_id
-          ) VALUES (gen_random_uuid(), $1, 0, 0, 0, 0, 0, $2)`,
-          [user.id, defaultDatabaseId]
-        );
-        console.log('[STEP 8] ✓ TokenStats initialized for new user');
-      } catch (tokenStatsError: any) {
-        console.log('[WARNING] Failed to initialize TokenStats:', tokenStatsError.message);
-        // Don't fail the authentication for this
-      }
-      
+    // Step 5: Handle admin authentication ONLY
+    if (authType === 'admin_login') {
+      return await handleAdminGoogleAuth(googleUserData, redirectTo);
     } else {
-      user = existingUserResult.rows[0];
-      console.log('[STEP 8] ✓ Existing user found with ID:', user.id);
-
-      // Update user if needed
-      const updates = [];
-      const values = [];
-      let paramIndex = 1;
-
-      if (!user.google_id) {
-        updates.push(`google_id = $${paramIndex++}`);
-        values.push(googleUserData.id);
-      }
-
-      if (!user.is_confirmed) {
-        updates.push(`is_confirmed = $${paramIndex++}`);
-        values.push(true);
-      }
-
-      if (updates.length > 0) {
-        values.push(user.id);
-        const updateQuery = `UPDATE beeusers SET ${updates.join(', ')} WHERE id = $${paramIndex}`;
-        await pool.query(updateQuery, values);
-        console.log('[STEP 8] ✓ User updated');
-        
-        // Refresh user data
-        const updatedUserResult = await pool.query(
-          'SELECT * FROM beeusers WHERE id = $1', 
-          [user.id]
-        );
-        user = updatedUserResult.rows[0];
-      }
+      // For non-admin attempts, redirect to regular login
+      throw new Error('This endpoint is for admin authentication only');
     }
-
-    // Step 9: Generate JWT
-    console.log('[STEP 9] Generating JWT token...');
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        email: user.email,
-        databaseId: user.database_id,
-      },
-      process.env.JWT_SECRET!,
-      { expiresIn: '24h' }
-    );
-    console.log('[STEP 9] ✓ JWT token generated');
-
-    // Step 10: Prepare response
-    console.log('[STEP 10] Preparing response...');
-    const redirectUrl = `${process.env.NEXT_PUBLIC_SITE_URL}/dashboard`;
-
-    const response = NextResponse.json(
-      {
-        message: 'Google authentication successful',
-        token,
-        redirectUrl,
-        user: {
-          id: user.id,
-          email: user.email,
-          firstname: user.firstname,
-          lastname: user.lastname,
-          name: `${user.firstname} ${user.lastname}`,
-          picture: googleUserData.picture,
-          verified_email: googleUserData.verified_email,
-          is_confirmed: user.is_confirmed,
-          database_id: user.database_id,
-        },
-      },
-      { status: 200 }
-    );
-
-    // Set HTTP-only cookie
-    response.cookies.set('token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
-      maxAge: 60 * 60 * 24, // 24 hours
-      path: '/',
-    });
-
-    console.log('[STEP 10] ✓ Response prepared successfully');
-    console.log('=== GOOGLE OAUTH SUCCESS ===');
-    
-    return response;
 
   } catch (error: any) {
     console.log('=== GOOGLE OAUTH ERROR ===');
     console.error('[FATAL ERROR]', error.message);
     console.error('[STACK TRACE]', error.stack);
-    
-    return NextResponse.json({ 
-      message: 'Server error during Google authentication',
-      error: error.message
-    }, { status: 500 });
+    throw error;
   }
+}
+
+// Handle GET requests (Google OAuth redirect)
+export async function GET(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const error = url.searchParams.get('error');
+
+    // Handle OAuth errors
+    if (error) {
+      console.log('[ERROR] OAuth error received:', error);
+      const errorUrl = `${process.env.NEXT_PUBLIC_SITE_URL}/admin/login?error=oauth_error&message=${encodeURIComponent(error)}`;
+      return NextResponse.redirect(errorUrl);
+    }
+
+    if (!code) {
+      console.log('[ERROR] No authorization code received');
+      const errorUrl = `${process.env.NEXT_PUBLIC_SITE_URL}/admin/login?error=no_code&message=${encodeURIComponent('No authorization code received')}`;
+      return NextResponse.redirect(errorUrl);
+    }
+
+    // Process the OAuth
+    const result = await handleGoogleOAuth(code, state || undefined);
+
+    // FIXED: Create redirect URL to dashboard instead of login page
+    const redirectUrl = new URL('/admin/dashboard', process.env.NEXT_PUBLIC_SITE_URL!);
+    
+    // Add success parameters for dashboard to process if needed
+    redirectUrl.searchParams.set('google_auth_success', 'true');
+    redirectUrl.searchParams.set('admin_id', result.admin.id.toString());
+    redirectUrl.searchParams.set('user_email', result.admin.email);
+
+    // Create response with redirect to dashboard
+    const response = NextResponse.redirect(redirectUrl.toString());
+
+    // Set HTTP-only cookie using same format as login route
+    if (result.token) {
+      response.cookies.set('admin-token', result.token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: 24 * 60 * 60, // 24 hours
+        path: '/',
+      });
+    }
+
+    console.log('[OAUTH] ✓ Admin login successful, redirecting to dashboard:', redirectUrl.toString());
+    return response;
+
+  } catch (error: any) {
+    console.error('GET OAuth Error:', error.message);
+    
+    // Map specific errors
+    let errorType = 'server_error';
+    let errorMessage = error.message;
+    
+    if (error.message.includes('No admin account found')) {
+      errorType = 'admin_not_found';
+    } else if (error.message.includes('Account is inactive')) {
+      errorType = 'account_inactive';
+    } else if (error.message.includes('No schema associated')) {
+      errorType = 'no_schema';
+    }
+    
+    // Redirect to admin login with error
+    const errorUrl = `${process.env.NEXT_PUBLIC_SITE_URL}/admin/login?error=${errorType}&message=${encodeURIComponent(errorMessage)}`;
+    return NextResponse.redirect(errorUrl);
+  }
+}
+
+// Remove POST method or make it consistent with admin auth
+export async function POST() {
+  return NextResponse.json({ 
+    message: 'Use GET method for OAuth callback' 
+  }, { status: 405 });
 }

@@ -1637,7 +1637,7 @@ const isProfileComplete = (user: User | null | undefined): boolean => {
   ): Promise<any> {
     try {
       const txData = contract.methods.createPatch(
-        adminId,           // Use the passed admin ID
+        1,           // Use the passed admin ID
         token,          
         originCert,        
         qualityCert,       
@@ -2481,6 +2481,7 @@ async function getbatch(adminId: number) {
     console.log("🏗️ Building transaction data...");
     const txData = await contract.methods.getPatchCountByBeekeeper(adminId).call();
     console.log("📋 Transaction data encoded:", txData);
+    return txData;
   } catch (error) {
     const err = error as Error;
     console.error('❌ Error in refreshData:');
@@ -2573,12 +2574,19 @@ async function getbatch(adminId: number) {
     console.log('🚀 Starting getbatch call...');
     
     // Call getbatch function
-    const batchResult = await getbatch(adminId);
+    (async () => {
+  try {
+    const batchCount = await getbatch(Number(1));
+    console.log("✅ Batch count:", batchCount);
+  } catch (err) {
+    console.error("❌ Failed to fetch batch count:", err);
+  }
+})();
     
     
-    console.log('✅ getbatch call njn completed successfully!', adminId);
+    //console.log('✅ getbatch call njn completed successfully!', adminId);
     //const txData = await contract.methods.getPatchCountByBeekeeper(adminId).call();
-    //console.log("📋 Transaction data encoded:", Number(txData));
+    //console.log("📋 Transaction data encoded:", Number(batchCount));
     
 
 
