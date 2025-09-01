@@ -1,11 +1,10 @@
 'use client';
-// In login/page.tsx and register/page.tsx
-export const dynamic = 'force-dynamic'
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSearchParams } from 'next/navigation';
 
-export default function AdminLoginPage() {
+// Separate the component that uses useSearchParams
+function AdminLoginContent() {
   const [credentials, setCredentials] = useState({
     email: '',
     password: '',
@@ -502,5 +501,28 @@ export default function AdminLoginPage() {
         }
       `}</style>
     </section>
+  );
+}
+
+// Loading component
+function LoginLoadingFallback() {
+  return (
+    <section className="relative min-h-screen w-full overflow-hidden bg-gradient-to-br from-slate-800 via-blue-900 to-indigo-900">
+      <div className="relative z-10 flex items-center justify-center min-h-screen px-4">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
+          <p className="text-white text-lg">Loading admin portal...</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// Main component with Suspense boundary
+export default function AdminLoginPage() {
+  return (
+    <Suspense fallback={<LoginLoadingFallback />}>
+      <AdminLoginContent />
+    </Suspense>
   );
 }
