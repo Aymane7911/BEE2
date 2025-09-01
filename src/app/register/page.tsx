@@ -1,5 +1,6 @@
 'use client';
-
+// In login/page.tsx and register/page.tsx
+export const dynamic = 'force-dynamic'
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Web3 from 'web3';

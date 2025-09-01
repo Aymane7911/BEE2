@@ -1403,44 +1403,53 @@ useEffect(() => {
   });
 };
 async function createPatch(quantity: number) {
-     try {
-       
-       
-   
-       // Encode transaction data
-       const txData = contract.methods.createPatch( 1,
-    quantity,
-    true,
-    true,
-    "").encodeABI();
-   
-       const baseFee = await web3.eth.getGasPrice(); // base network fee
-   const priorityFee = web3.utils.toWei('2', 'gwei'); // tip for miners
-   
-   // maxFee = baseFee + tip
-   const maxFee = (BigInt(baseFee) + BigInt(priorityFee)).toString();
-   
-   const tx = {
-     from: process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT,
-     to: contractAddress,
-     data: txData,
-     gas: 2000000,
-     maxFeePerGas: maxFee,
-     maxPriorityFeePerGas: priorityFee,
-   };
-   
-   
-       // Sign transaction with fixed account's private key
-       const signedTx = await web3.eth.accounts.signTransaction(tx, process.env.NEXT_PUBLIC_HARDHAT_PRIVATE_KEY!);
-   
-       // Send transaction
-       const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
-       console.log("✅ Transaction successful:", receipt.transactionHash);
-   
-     } catch (error) {
-       console.error("❌ Error calling contract function:", error);
-     }
-   }
+  try {
+    console.log("🔧 Creating patch with quantity:", quantity);
+    
+    // FIXED: Correct parameter types for createPatch
+    // createPatch(beekeeperId, jarCount, jarSize, originCert, qualityCert)
+    //            uint256      uint256    uint256   bool        bool
+    
+    const txData = contract.methods.createPatch(
+      1,           // beekeeperId: uint256 ✅
+      quantity,    // jarCount: uint256 ✅
+      250,         // jarSize: uint256 ✅ (was "true" - FIXED!)
+      true,        // originCert: bool ✅
+      true         // qualityCert: bool ✅ (was "" - FIXED!)
+    ).encodeABI();
+
+    console.log("✅ Transaction data encoded successfully");
+
+    const baseFee = await web3.eth.getGasPrice();
+    const priorityFee = web3.utils.toWei('2', 'gwei');
+    const maxFee = (BigInt(baseFee) + BigInt(priorityFee)).toString();
+
+    const tx = {
+      from: process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT,
+      to: contractAddress,
+      data: txData,
+      gas: 2000000,
+      maxFeePerGas: maxFee,
+      maxPriorityFeePerGas: priorityFee,
+    };
+
+    console.log("🔐 Signing transaction...");
+    const signedTx = await web3.eth.accounts.signTransaction(
+      tx, 
+      process.env.NEXT_PUBLIC_HARDHAT_PRIVATE_KEY!
+    );
+
+    console.log("📤 Sending transaction...");
+    const receipt = await web3.eth.sendSignedTransaction(signedTx.rawTransaction);
+    console.log("✅ Transaction successful:", receipt.transactionHash);
+    
+    return receipt;
+
+  } catch (error) {
+    console.error("❌ Error calling contract function:", error);
+    throw error;
+  }
+}
 // Handle file upload
 const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
   const file = e.target.files![0];
@@ -2474,23 +2483,26 @@ async function saveApiaryToDatabase(apiaryData: any) {
 
   // Handle apiary form field changes
  
-async function getbatch(adminId: number) {
+async function getBatch(adminId: number) {
   try {
-    console.log("🔄 Inside getbatch function, adminId:", adminId);
+    console.log("🔄 Inside getBatch function, adminId:", adminId);
     
     console.log("🏗️ Building transaction data...");
     const txData = await contract.methods.getPatchCountByBeekeeper(adminId).call();
-    console.log("📋 Transaction data encoded:", txData);
+    console.log("📋 Transaction data result:", txData);
+    console.log("📋 Transaction data as number:", Number(txData));
     return txData;
   } catch (error) {
     const err = error as Error;
-    console.error('❌ Error in refreshData:');
+    console.error('❌ Error in getBatch:'); // Fixed function name in error message
     console.error('📋 Error type:', err?.constructor?.name);
     console.error('📋 Error message:', err.message);
     console.error('📋 Full error object:', err);
     console.error('📋 Stack trace:', err.stack);
+    throw error; // Re-throw the error so it can be caught by the caller
+  }
 }
-}
+
   // Refresh data from API
  const refreshData = async () => {
   try {
@@ -2571,33 +2583,22 @@ async function getbatch(adminId: number) {
     }
     
     console.log('📋 AdminId extracted:', adminId);
-    console.log('🚀 Starting getbatch call...');
+    console.log('🚀 Starting getBatch call...');
     
-    // Call getbatch function
-    (async () => {
-  try {
-    const batchCount = await getbatch(Number(1));
-    console.log("✅ Batch count:", batchCount);
-  } catch (err) {
-    console.error("❌ Failed to fetch batch count:", err);
-  }
-})();
-    
-    
-    //console.log('✅ getbatch call njn completed successfully!', adminId);
-    //const txData = await contract.methods.getPatchCountByBeekeeper(adminId).call();
-    //console.log("📋 Transaction data encoded:", Number(batchCount));
-    
-
-
-    
-    // Force multiple separate logs to ensure visibility
-    
-   
-    
-    
-    
-    
+    // FIXED: Properly await the getBatch call and use the actual adminId
+    try {
+      const batchCount = await getBatch(Number(adminId)); // Use actual adminId, not hardcoded 1
+      console.log("✅ Batch count result:", batchCount);
+      console.log("✅ Batch count as number:", Number(batchCount));
+      
+      // You can now use batchCount for further processing
+      // For example, save it to state:
+      // setBatchCount(Number(batchCount));
+      
+    } catch (batchError) {
+      console.error("❌ Failed to fetch batch count:", batchError);
+      // Don't throw here if you want the rest of refreshData to continue
+    }
     
     console.log('=== BATCH ANALYSIS COMPLETE ===');
     console.log('✅ refreshData completed successfully');
@@ -2609,7 +2610,8 @@ async function getbatch(adminId: number) {
     console.error('📋 Error message:', err.message);
     console.error('📋 Full error object:', err);
     console.error('📋 Stack trace:', err.stack);
-} finally {
+    setError(err.message);
+  } finally {
     setIsLoading(false);
     console.log('🏁 refreshData function completed (finally block)');
   }

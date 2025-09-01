@@ -435,6 +435,11 @@ export const contractABI = [
           "type": "uint256"
         },
         {
+          "internalType": "uint256",
+          "name": "certificateId",
+          "type": "uint256"
+        },
+        {
           "internalType": "bool",
           "name": "originCert",
           "type": "bool"
@@ -443,11 +448,6 @@ export const contractABI = [
           "internalType": "bool",
           "name": "qualityCert",
           "type": "bool"
-        },
-        {
-          "internalType": "string",
-          "name": "certURI",
-          "type": "string"
         }
       ],
       "name": "createPatch",

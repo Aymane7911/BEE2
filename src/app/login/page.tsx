@@ -1,5 +1,6 @@
 'use client';
-
+// In login/page.tsx and register/page.tsx
+export const dynamic = 'force-dynamic'
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSearchParams } from 'next/navigation';
