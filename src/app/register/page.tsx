@@ -1,13 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, Suspense } from 'react';
 import { useRouter } from 'next/navigation';
 import Web3 from 'web3';
 import { contractABI, contractAddress } from '../../contractsinfo';
 import { useSearchParams } from 'next/navigation';
 import { useEffect } from 'react';
 
-export default function AdminRegistrationPage() {
+// Create a wrapper component that uses useSearchParams
+function AdminRegistrationContent() {
   const [formData, setFormData] = useState({
     firstname: '',
     lastname: '',
@@ -15,9 +16,10 @@ export default function AdminRegistrationPage() {
     phonenumber: '',
     password: '',
     confirmPassword: '',
-    role: 'admin', // Default role
+    role: 'admin',
     useEmail: true,
   });
+  
   const web3 = new Web3("http://127.0.0.1:8545");
   const contract = new web3.eth.Contract(contractABI, process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT);
 
@@ -38,6 +40,42 @@ export default function AdminRegistrationPage() {
   const [success, setSuccess] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    // Check for OAuth error
+    const error = searchParams.get('error');
+    const message = searchParams.get('message');
+    
+    if (error) {
+      setIsLoading(false);
+      switch (error) {
+        case 'oauth_error':
+          setError(`Google OAuth error: ${message || 'Authentication failed'}`);
+          break;
+        case 'no_code':
+          setError('Authorization was cancelled or failed');
+          break;
+        case 'server_error':
+          setError(`Server error: ${message || 'Please try again'}`);
+          break;
+        default:
+          setError('Authentication failed. Please try again.');
+      }
+    }
+    
+    // Check for success (if the redirect goes to this page instead of dashboard)
+    const authSuccess = searchParams.get('auth_success');
+    if (authSuccess === 'true') {
+      const userEmail = searchParams.get('user_email');
+      setSuccess(`Authentication successful! Welcome ${userEmail}`);
+      
+      // Redirect to dashboard after a brief delay
+      setTimeout(() => {
+        router.push('/admin/dashboard');
+      }, 2000);
+    }
+  }, [searchParams, router]);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>
@@ -50,37 +88,38 @@ export default function AdminRegistrationPage() {
     setFormData(prev => ({ ...prev, useEmail: !prev.useEmail }));
   };
 
-const handleGoogleAuth = async () => {
-  try {
-    setIsLoading(true);
-    setError('');
-    
-    // Build the Google OAuth URL with proper parameters
-    const baseUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
-    const params = new URLSearchParams({
-      client_id: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '',
-      redirect_uri: `${window.location.origin}/api/auth/google/callback`,
-      response_type: 'code',
-      scope: 'email profile openid',
-      access_type: 'offline',
-      prompt: 'consent',
-      state: JSON.stringify({
-        type: 'admin',
-        redirectTo: '/admin/dashboard'
-      })
-    });
-    
-    const googleAuthUrl = `${baseUrl}?${params.toString()}`;
-    
-    // Redirect to Google OAuth
-    window.location.href = googleAuthUrl;
-    
-  } catch (err) {
-    console.error('Google OAuth error:', err);
-    setError('Failed to initialize Google authentication.');
-    setIsLoading(false);
-  }
-};
+  const handleGoogleAuth = async () => {
+    try {
+      setIsLoading(true);
+      setError('');
+      
+      // Build the Google OAuth URL with proper parameters
+      const baseUrl = 'https://accounts.google.com/o/oauth2/v2/auth';
+      const params = new URLSearchParams({
+        client_id: process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '',
+        redirect_uri: `${window.location.origin}/api/auth/google/callback`,
+        response_type: 'code',
+        scope: 'email profile openid',
+        access_type: 'offline',
+        prompt: 'consent',
+        state: JSON.stringify({
+          type: 'admin',
+          redirectTo: '/admin/dashboard'
+        })
+      });
+      
+      const googleAuthUrl = `${baseUrl}?${params.toString()}`;
+      
+      // Redirect to Google OAuth
+      window.location.href = googleAuthUrl;
+      
+    } catch (err) {
+      console.error('Google OAuth error:', err);
+      setError('Failed to initialize Google authentication.');
+      setIsLoading(false);
+    }
+  };
+
   const sendOtp = async (phoneNumber: string) => {
     try {
       const response = await fetch('/api/send-otp', {
@@ -131,43 +170,6 @@ const handleGoogleAuth = async () => {
       return false;
     }
   };
-  
-  const searchParams = useSearchParams();
-
-useEffect(() => {
-  // Check for OAuth error
-  const error = searchParams.get('error');
-  const message = searchParams.get('message');
-  
-  if (error) {
-    setIsLoading(false);
-    switch (error) {
-      case 'oauth_error':
-        setError(`Google OAuth error: ${message || 'Authentication failed'}`);
-        break;
-      case 'no_code':
-        setError('Authorization was cancelled or failed');
-        break;
-      case 'server_error':
-        setError(`Server error: ${message || 'Please try again'}`);
-        break;
-      default:
-        setError('Authentication failed. Please try again.');
-    }
-  }
-  
-  // Check for success (if the redirect goes to this page instead of dashboard)
-  const authSuccess = searchParams.get('auth_success');
-  if (authSuccess === 'true') {
-    const userEmail = searchParams.get('user_email');
-    setSuccess(`Authentication successful! Welcome ${userEmail}`);
-    
-    // Redirect to dashboard after a brief delay
-    setTimeout(() => {
-      router.push('/admin/dashboard');
-    }, 2000);
-  }
-}, [searchParams, router]);
 
   const handleSubmit = async () => {
     setError('');
@@ -766,5 +768,21 @@ useEffect(() => {
         </div>
       </div>
     </section>
+  );
+}
+
+// Main component with Suspense boundary
+export default function AdminRegistrationPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-800 via-blue-900 to-indigo-900">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+          <p className="mt-4 text-white text-lg">Loading registration form...</p>
+        </div>
+      </div>
+    }>
+      <AdminRegistrationContent />
+    </Suspense>
   );
 }
