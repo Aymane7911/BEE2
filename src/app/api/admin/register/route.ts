@@ -299,7 +299,7 @@ async function createAdminAsUserInSchema(
         adminId: adminId,
         // For phone registrations, auto-confirm since phone is already verified
         isConfirmed: isPhoneRegistration,
-        isProfileComplete: true,
+        isProfileComplete: false,
       }
     });
 
