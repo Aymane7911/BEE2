@@ -1,4 +1,4 @@
-// app/api/admin/login/route.ts - Unified Authentication Version
+// app/api/admin/login/route.ts - Complete Enhanced Version with Email Confirmation
 import { NextRequest, NextResponse } from 'next/server';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
@@ -127,7 +127,7 @@ async function getGoogleUserInfo(authCode: string): Promise<GoogleUserInfo> {
   return userData;
 }
 
-// Login admin with email/password
+// Login admin with email/password - WITH CONFIRMATION CHECK
 async function loginAdminWithCredentials(email: string, password: string) {
   console.log('🔐 Attempting email/password login for:', email);
   
@@ -135,18 +135,8 @@ async function loginAdminWithCredentials(email: string, password: string) {
   
   const adminRecord = await masterPrisma.admin.findUnique({
     where: { email: email.toLowerCase() },
-    select: {
-      id: true,
-      firstname: true,
-      lastname: true,
-      email: true,
-      password: true,
-      role: true,
-      schemaName: true,
-      displayName: true,
-      description: true,
-      isActive: true,
-      createdAt: true
+    include: {
+      confirmation: true // Include confirmation data
     }
   });
 
@@ -156,6 +146,11 @@ async function loginAdminWithCredentials(email: string, password: string) {
 
   if (!adminRecord.isActive) {
     throw new Error('Account is inactive');
+  }
+
+  // CHECK EMAIL CONFIRMATION
+  if (!adminRecord.confirmation || !adminRecord.confirmation.confirmedAt) {
+    throw new Error('Email not confirmed. Please check your email and confirm your account before logging in.');
   }
 
   // Verify password
@@ -171,7 +166,7 @@ async function loginAdminWithCredentials(email: string, password: string) {
   return adminRecord;
 }
 
-// Login admin with Google OAuth
+// Login admin with Google OAuth - WITH CONFIRMATION CHECK
 async function loginAdminWithGoogle(googleAuthCode: string) {
   console.log('🔐 Attempting Google OAuth login');
   
@@ -187,18 +182,8 @@ async function loginAdminWithGoogle(googleAuthCode: string) {
   // Find admin by Google email
   const adminRecord = await masterPrisma.admin.findUnique({
     where: { email: googleUser.email.toLowerCase() },
-    select: {
-      id: true,
-      firstname: true,
-      lastname: true,
-      email: true,
-      password: true,
-      role: true,
-      schemaName: true,
-      displayName: true,
-      description: true,
-      isActive: true,
-      createdAt: true
+    include: {
+      confirmation: true // Include confirmation data
     }
   });
 
@@ -208,6 +193,11 @@ async function loginAdminWithGoogle(googleAuthCode: string) {
 
   if (!adminRecord.isActive) {
     throw new Error('Account is inactive');
+  }
+
+  // CHECK EMAIL CONFIRMATION FOR GOOGLE LOGIN TOO
+  if (!adminRecord.confirmation || !adminRecord.confirmation.confirmedAt) {
+    throw new Error('Email not confirmed. Please confirm your account before logging in.');
   }
 
   if (!adminRecord.schemaName) {
@@ -223,11 +213,10 @@ async function loginAdminWithGoogle(googleAuthCode: string) {
   return adminRecord;
 }
 
-// Verify existing session (for Google OAuth callback)
+// Verify existing session - WITH CONFIRMATION CHECK
 async function verifyExistingSession(email: string, request: NextRequest) {
   console.log('🔐 Verifying existing session for:', email);
   
-  // Check if there's already a valid token in httpOnly cookie
   const adminToken = request.cookies.get('admin-token');
   
   if (!adminToken) {
@@ -248,24 +237,21 @@ async function verifyExistingSession(email: string, request: NextRequest) {
 
     const masterPrisma = getMasterPrismaClient();
     
-    // Get fresh admin data
+    // Get fresh admin data WITH confirmation check
     const adminRecord = await masterPrisma.admin.findUnique({
       where: { email: email.toLowerCase() },
-      select: {
-        id: true,
-        firstname: true,
-        lastname: true,
-        email: true,
-        role: true,
-        schemaName: true,
-        displayName: true,
-        description: true,
-        isActive: true
+      include: {
+        confirmation: true // Include confirmation data
       }
     });
 
     if (!adminRecord || !adminRecord.isActive) {
       throw new Error('Admin account not found or inactive');
+    }
+
+    // CHECK CONFIRMATION IN SESSION VERIFICATION TOO
+    if (!adminRecord.confirmation || !adminRecord.confirmation.confirmedAt) {
+      throw new Error('Email not confirmed. Please confirm your account.');
     }
 
     return adminRecord;
@@ -420,6 +406,14 @@ export async function POST(request: NextRequest): Promise<NextResponse<LoginResp
     if (error.message.includes('Account is inactive')) {
       return NextResponse.json<LoginResponse>(
         { success: false, error: 'Account is inactive. Please contact support.' },
+        { status: 403 }
+      );
+    }
+
+    // NEW: Handle email confirmation errors
+    if (error.message.includes('Email not confirmed')) {
+      return NextResponse.json<LoginResponse>(
+        { success: false, error: 'Email not confirmed. Please check your email and confirm your account before logging in.' },
         { status: 403 }
       );
     }

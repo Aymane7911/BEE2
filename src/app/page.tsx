@@ -430,7 +430,7 @@ export default function Hero() {
                 <span className="text-2xl">🍯</span>
               </div>
               <div>
-                <h1 className="text-xl font-bold text-yellow-400">Honey Certify</h1>
+                <h1 className="text-xl font-bold text-yellow-400">Honexis</h1>
                 <p className="text-xs text-gray-400">Blockchain Verification</p>
               </div>
             </motion.div>
@@ -531,33 +531,7 @@ export default function Hero() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: 1.8, duration: 0.8 }}
                   >
-                    <p className="text-gray-300 text-sm mb-2 sm:mb-0 sm:self-center">Quick access:</p>
-                    <div className="flex gap-3 justify-center lg:justify-start">
-                      <motion.button
-                        onClick={() => setShowPhoneAuth(true)}
-                        className="bg-white/10 backdrop-blur-md text-white hover:bg-white/20 font-medium py-2 px-4 rounded-lg text-sm border border-white/20 transition-all duration-300 flex items-center gap-2"
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                      >
-                        📱 Phone
-                      </motion.button>
-                      <motion.button
-                        onClick={handleGoogleAuth}
-                        className="bg-white/10 backdrop-blur-md text-white hover:bg-white/20 font-medium py-2 px-4 rounded-lg text-sm border border-white/20 transition-all duration-300 flex items-center gap-2"
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                      >
-                        🔍 Google
-                      </motion.button>
-                      <motion.button
-                        onClick={handleLinkedInAuth}
-                        className="bg-white/10 backdrop-blur-md text-white hover:bg-white/20 font-medium py-2 px-4 rounded-lg text-sm border border-white/20 transition-all duration-300 flex items-center gap-2"
-                        whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                      >
-                        💼 LinkedIn
-                      </motion.button>
-                    </div>
+                    
                   </motion.div>
                   
                 </motion.div>
@@ -677,19 +651,19 @@ export default function Hero() {
         <div className="max-w-7xl mx-auto grid gap-8 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 relative z-10">
           {[
             {
-              name: "Sarah Johnson",
-              role: "Organic Honey Producer",
+              name: "Fouad Lamghari",
+              role: "Manager",
               rating: 5,
               text: "The certification process was seamless and professional. Our customers absolutely love the transparency and trust it brings to our brand!"
             },
             {
-              name: "Mike Chen",
+              name: "Youssef",
               role: "Artisan Beekeeper",
               rating: 5,
               text: "The blockchain verification is revolutionary! It's given our small business the credibility to compete with larger brands."
             },
             {
-              name: "Emma Williams",
+              name: "Moncef",
               role: "Commercial Producer",
               rating: 5,
               text: "Sales increased by 40% after certification. The trust factor is incredible - customers know they're getting authentic honey."
@@ -1112,10 +1086,10 @@ export default function Hero() {
             <div className="w-8 h-8 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-lg flex items-center justify-center">
               <span className="text-lg">🍯</span>
             </div>
-            <span className="text-xl font-bold text-yellow-400">Honey Certify</span>
+            <span className="text-xl font-bold text-yellow-400">Honexis</span>
           </div>
           <p className="text-gray-400 text-sm">
-            © 2025 Honey Certify. All rights reserved. | Blockchain-powered honey certification.
+            © 2025 Honexis. All rights reserved. | Blockchain-powered honey certification.
           </p>
         </div>
       </footer>
