@@ -909,7 +909,9 @@ const removeJarFromBatch = (jarId: any) => {
 
   const [profileData, setProfileData] = useState({
     passportId: '',
-    passportScan: null
+    passportScan: null,
+     phoneNumber: '', // Make sure this is always a string
+     isPhoneVerified: false,
   });
   const [isLoading, setIsLoading] = useState(true);
   // allow error to be a string or null
@@ -1393,9 +1395,9 @@ useEffect(() => {
   
   // Handle profile form changes
 
-  const handleProfileChange = (
-  field: 'batchNumber' | 'name' | 'number' | 'hiveCount' | 'latitude' | 'longitude' | 'kilosCollected' | 'passportScan' | 'passportId', 
-  value: string | File | number | null
+ const handleProfileChange = (
+  field: 'batchNumber' | 'name' | 'number' | 'hiveCount' | 'latitude' | 'longitude' | 'kilosCollected' | 'passportScan' | 'passportId' | 'phoneNumber' | 'isPhoneVerified',
+  value: string | File | number | boolean | null
 ) => {
   setProfileData({
     ...profileData,
@@ -1521,7 +1523,9 @@ const handleProfileSubmit = async (e: React.FormEvent) => {
       // Reset form data
       setProfileData({
         passportId: '',
-        passportScan: null
+        passportScan: null,
+         phoneNumber: '', // Make sure this is always a string
+         isPhoneVerified: false,
       });
       
       console.log('Profile updated successfully:', result);

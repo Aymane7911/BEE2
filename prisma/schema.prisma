@@ -48,6 +48,20 @@ model AdminSession {
   @@map("admin_sessions")
 }
 
+model phoneVerification {
+  id          Int      @id @default(autoincrement())
+  userId      Int      @unique
+  phonenumber String
+  code        String
+  isVerified  Boolean  @default(false)
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relation to your user model
+  user        beeusers @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
 
 // Admin email confirmation tokens (stored in public schema)
 model AdminConfirmation {
@@ -98,6 +112,7 @@ model beeusers {
   certifications    Certification[]
   sessions          Session[]
   tokenStats        TokenStats?
+  phoneVerification phoneVerification?
 
   @@map("beeusers")
 }
