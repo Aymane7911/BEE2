@@ -4,25 +4,54 @@ import { publicDb } from '@/lib/database-connection';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 
-// Initialize Firebase Admin SDK
-if (!getApps().length) {
-  const serviceAccount = {
-    type: "service_account",
-    project_id: process.env.FIREBASE_PROJECT_ID,
-    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-    private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    client_email: process.env.FIREBASE_CLIENT_EMAIL,
-    client_id: process.env.FIREBASE_CLIENT_ID,
-    auth_uri: process.env.FIREBASE_AUTH_URI,
-    token_uri: process.env.FIREBASE_TOKEN_URI,
-    auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
-    client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
-  };
+// Move Firebase initialization to a function to avoid build-time execution
+function getFirebaseAdmin() {
+  const apps = getApps();
+  if (apps.length > 0) {
+    return apps[0];
+  }
 
-  initializeApp({
-    credential: cert(serviceAccount as any),
-    projectId: process.env.FIREBASE_PROJECT_ID,
-  });
+  // Validate required environment variables
+  const requiredVars = [
+    'FIREBASE_PROJECT_ID',
+    'FIREBASE_PRIVATE_KEY',
+    'FIREBASE_CLIENT_EMAIL'
+  ];
+
+  for (const varName of requiredVars) {
+    if (!process.env[varName]) {
+      throw new Error(`Missing required environment variable: ${varName}`);
+    }
+  }
+
+  try {
+    const serviceAccount = {
+      type: "service_account",
+      project_id: process.env.FIREBASE_PROJECT_ID,
+      private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+      private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      client_email: process.env.FIREBASE_CLIENT_EMAIL,
+      client_id: process.env.FIREBASE_CLIENT_ID,
+      auth_uri: process.env.FIREBASE_AUTH_URI || "https://accounts.google.com/o/oauth2/auth",
+      token_uri: process.env.FIREBASE_TOKEN_URI || "https://oauth2.googleapis.com/token",
+      auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL || "https://www.googleapis.com/oauth2/v1/certs",
+      client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
+    };
+
+    // Ensure project_id is a string (the error you're getting)
+    if (!serviceAccount.project_id || typeof serviceAccount.project_id !== 'string') {
+      throw new Error('Firebase project_id must be a non-empty string');
+    }
+
+    return initializeApp({
+      credential: cert(serviceAccount as any),
+      projectId: serviceAccount.project_id, // Use the validated project_id
+    });
+
+  } catch (error) {
+    console.error('Firebase Admin SDK initialization failed:', error);
+    throw new Error(`Firebase initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 }
 
 // Fallback SMS function for development/testing
@@ -66,8 +95,10 @@ export async function POST(request: NextRequest) {
 
     if (useFirebase) {
       try {
-        // Firebase handles OTP generation and sending automatically
-        // We just need to store a record for tracking purposes
+        // Initialize Firebase only when needed (not at module level)
+        const firebaseApp = getFirebaseAdmin();
+        const auth = getAuth(firebaseApp);
+        
         console.log('Firebase OTP requested for:', normalizedPhone);
 
         // Delete any existing OTP records for this phone number
@@ -99,7 +130,7 @@ export async function POST(request: NextRequest) {
       } catch (firebaseError) {
         console.error('Firebase OTP error:', firebaseError);
         // Fall back to manual SMS if Firebase fails
-        console.log('Falling back to manual SMS...');
+        console.log('Falling back to manual SMS due to Firebase error:', firebaseError instanceof Error ? firebaseError.message : 'Unknown error');
       }
     }
 

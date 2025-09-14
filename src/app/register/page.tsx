@@ -377,7 +377,7 @@ function AdminRegistrationContent() {
                 </svg>
               </div>
               <div>
-                <h1 className="text-xl font-bold text-white">Honexis</h1>
+                <h1 className="text-xl font-bold text-white">Tiqah</h1>
                 <p className="text-xs text-gray-200">System Management</p>
               </div>
             </div>
