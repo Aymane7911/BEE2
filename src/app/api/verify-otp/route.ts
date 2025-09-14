@@ -1,28 +1,66 @@
 // app/api/verify-otp/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { publicDb } from '@/lib/database-connection';
-import { initializeApp, getApps, cert } from 'firebase-admin/app';
-import { getAuth } from 'firebase-admin/auth';
 
-// Initialize Firebase Admin SDK if not already initialized
-if (!getApps().length) {
-  const serviceAccount = {
-    type: "service_account",
-    project_id: process.env.FIREBASE_PROJECT_ID,
-    private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-    private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    client_email: process.env.FIREBASE_CLIENT_EMAIL,
-    client_id: process.env.FIREBASE_CLIENT_ID,
-    auth_uri: process.env.FIREBASE_AUTH_URI,
-    token_uri: process.env.FIREBASE_TOKEN_URI,
-    auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL,
-    client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
-  };
+// DO NOT import Firebase at module level during build
+// We'll import it dynamically only when needed
 
-  initializeApp({
-    credential: cert(serviceAccount as any),
-    projectId: process.env.FIREBASE_PROJECT_ID,
-  });
+// Firebase initialization function - only called when needed
+async function getFirebaseAdmin() {
+  // Only initialize if we're not in build mode
+  if (process.env.NODE_ENV === 'production' && !process.env.FIREBASE_PROJECT_ID) {
+    throw new Error('Firebase not configured for production');
+  }
+
+  try {
+    // Dynamic import to prevent build-time execution
+    const { initializeApp, getApps, cert } = await import('firebase-admin/app');
+    
+    const apps = getApps();
+    if (apps.length > 0) {
+      return apps[0];
+    }
+
+    // Validate required environment variables
+    const requiredVars = [
+      'FIREBASE_PROJECT_ID',
+      'FIREBASE_PRIVATE_KEY',
+      'FIREBASE_CLIENT_EMAIL'
+    ];
+
+    for (const varName of requiredVars) {
+      if (!process.env[varName]) {
+        throw new Error(`Missing required environment variable: ${varName}`);
+      }
+    }
+
+    const serviceAccount = {
+      type: "service_account",
+      project_id: process.env.FIREBASE_PROJECT_ID,
+      private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+      private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      client_email: process.env.FIREBASE_CLIENT_EMAIL,
+      client_id: process.env.FIREBASE_CLIENT_ID,
+      auth_uri: process.env.FIREBASE_AUTH_URI || "https://accounts.google.com/o/oauth2/auth",
+      token_uri: process.env.FIREBASE_TOKEN_URI || "https://oauth2.googleapis.com/token",
+      auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL || "https://www.googleapis.com/oauth2/v1/certs",
+      client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
+    };
+
+    // Ensure project_id is a string (the error you're getting)
+    if (!serviceAccount.project_id || typeof serviceAccount.project_id !== 'string') {
+      throw new Error('Firebase project_id must be a non-empty string');
+    }
+
+    return initializeApp({
+      credential: cert(serviceAccount as any),
+      projectId: serviceAccount.project_id,
+    });
+
+  } catch (error) {
+    console.error('Firebase Admin SDK initialization failed:', error);
+    throw new Error(`Firebase initialization failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -49,7 +87,12 @@ export async function POST(request: NextRequest) {
     if (firebaseIdToken) {
       try {
         console.log('Verifying Firebase ID token...');
-        const auth = getAuth();
+        
+        // Initialize Firebase only when needed and dynamically import getAuth
+        const firebaseApp = await getFirebaseAdmin();
+        const { getAuth } = await import('firebase-admin/auth');
+        const auth = getAuth(firebaseApp);
+        
         const decodedToken = await auth.verifyIdToken(firebaseIdToken);
         
         console.log('Firebase token verified successfully');
@@ -86,10 +129,8 @@ export async function POST(request: NextRequest) {
 
       } catch (firebaseError) {
         console.error('Firebase token verification failed:', firebaseError);
-        return NextResponse.json(
-          { success: false, error: 'Invalid verification token' },
-          { status: 400 }
-        );
+        // Fallback to manual OTP verification if Firebase fails
+        console.log('Firebase verification failed, falling back to manual OTP...');
       }
     }
 
