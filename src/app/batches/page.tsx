@@ -1680,7 +1680,7 @@ const isProfileComplete = (user: User | null | undefined): boolean => {
       throw error;
     }
   }
-// Enhanced handleCompleteBatch with proper original value preservation
+// Enhanced handleCompleteBatch with proper original value preservation habhdbahdba
 const handleCompleteBatch = async (e: React.FormEvent<HTMLFormElement>): Promise<void> => {
   e.preventDefault();
 
