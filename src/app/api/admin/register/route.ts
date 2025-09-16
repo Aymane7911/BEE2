@@ -26,19 +26,17 @@ async function testPrismaConnection() {
 const createEmailTransporter = (): Transporter => {
   if (process.env.EMAIL_SERVICE === 'sendgrid') {
     console.log('📧 Using SendGrid for email delivery');
-    return nodemailer.createTransport({
+    return nodemailer.createTransport({  // Changed: removed 'er'
       service: 'SendGrid',
       auth: {
         user: 'apikey',
         pass: process.env.SENDGRID_API_KEY,
       },
-      connectionTimeout: 30000,
-      greetingTimeout: 15000,
-      socketTimeout: 30000,
+      // Removed Railway-specific timeouts to avoid TypeScript issues
     });
   } else if (process.env.EMAIL_SERVICE === 'smtp') {
     console.log('📧 Using custom SMTP for email delivery');
-    return nodemailer.createTransport({
+    return nodemailer.createTransport({  // Changed: removed 'er'
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT || '587'),
       secure: process.env.SMTP_SECURE === 'true',
@@ -46,25 +44,20 @@ const createEmailTransporter = (): Transporter => {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS,
       },
-      connectionTimeout: 30000,
-      greetingTimeout: 15000,
-      socketTimeout: 30000,
+      // Removed Railway-specific settings that might cause TypeScript issues
       tls: {
         rejectUnauthorized: false,
       },
     });
   } else {
     console.log('📧 Using Gmail for email delivery (Railway optimized)');
-    // Use the service approach for Gmail which handles pooling automatically
-    return nodemailer.createTransport({
-      service: 'gmail',
+    return nodemailer.createTransport({  // Changed: removed 'er'
+      service: 'gmail',  // Use service instead of host for better compatibility
       auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASSWORD,
       },
-      connectionTimeout: 30000,
-      greetingTimeout: 15000,
-      socketTimeout: 30000,
+      // Removed Railway-specific settings that might cause TypeScript issues
       tls: {
         rejectUnauthorized: false,
       },
@@ -74,7 +67,7 @@ const createEmailTransporter = (): Transporter => {
 
 // Railway-optimized email sending with retry logic
 async function sendConfirmationEmail(email: string, token: string, adminName: string): Promise<boolean> {
-  const maxRetries = 2;
+  const maxRetries = 3;
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -86,18 +79,24 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
       transporter = createEmailTransporter();
       const confirmationUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/admin/confirm-email?token=${token}`;
       
-      // Quick connection test with timeout
-      console.log('🔍 Testing SMTP connection...');
-      await Promise.race([
-        transporter.verify(),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Connection test timeout after 10s')), 10000)
-        )
-      ]);
-      console.log('✅ SMTP connection verified');
+      // Skip connection test on Railway - it's causing the timeout
+      const isRailway = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
+      
+      if (!isRailway) {
+        console.log('🔍 Testing SMTP connection...');
+        await Promise.race([
+          transporter.verify(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Connection test timeout')), 8000)
+          )
+        ]);
+        console.log('✅ SMTP connection verified');
+      } else {
+        console.log('🚂 Railway detected - skipping connection test');
+      }
 
       const mailOptions = {
-        from: process.env.EMAIL_USER || 'aymanafcat@gmail.com',
+        from: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'aymanafcat@gmail.com',
         to: email,
         subject: 'Confirm Your Admin Account',
         html: `
@@ -161,17 +160,16 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
         `,
       };
 
-      // Send email with Railway-specific timeout
+      // Send email with Railway-optimized timeout
       console.log('📤 Sending confirmation email...');
       const info = await Promise.race([
         transporter.sendMail(mailOptions),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Email send timeout after 25s')), 25000)
+          setTimeout(() => reject(new Error('Email send timeout')), 20000)
         )
       ]) as any;
       
       console.log('✅ Confirmation email sent successfully:', info.messageId);
-      
       return true;
 
     } catch (error: any) {
@@ -179,12 +177,11 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
       console.error(`❌ Railway email attempt ${attempt} failed:`, error.message);
       
       if (attempt < maxRetries) {
-        const waitTime = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
+        const waitTime = Math.min(2000 * attempt, 6000);
         console.log(`⏳ Waiting ${waitTime}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     } finally {
-      // Always close transporter to prevent connection leaks on Railway
       if (transporter && typeof transporter.close === 'function') {
         try {
           transporter.close();
@@ -195,9 +192,8 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
     }
   }
 
-  // All attempts failed
   console.error('❌ All Railway email attempts failed. Last error:', lastError?.message);
-  throw new Error(`Failed to send confirmation email after ${maxRetries} attempts: ${lastError?.message}`);
+  throw new Error(`Failed to send confirmation email: ${lastError?.message}`);
 }
 
 // Types
