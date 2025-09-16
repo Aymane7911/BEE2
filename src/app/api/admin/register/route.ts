@@ -1,13 +1,14 @@
-// app/api/admin/register/route.ts - TypeScript-Safe Railway Version
+// app/api/admin/register/route.ts - Railway-Optimized with Resend
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { Client } from 'pg';
 import { execSync } from 'child_process';
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import { publicDb, createAdminEntry } from '@/lib/database-connection';
-import type { Transporter } from 'nodemailer';
-import type SMTPTransport from 'nodemailer/lib/smtp-transport';
+
+// Initialize Resend client
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // Test database connection on startup
 async function testPrismaConnection() {
@@ -22,82 +23,31 @@ async function testPrismaConnection() {
   }
 }
 
-// TypeScript-safe email configuration for Railway
-const createEmailTransporter = (): Transporter => {
-  if (process.env.EMAIL_SERVICE === 'sendgrid') {
-    console.log('📧 Using SendGrid for email delivery');
-    return nodemailer.createTransport({  // Changed: removed 'er'
-      service: 'SendGrid',
-      auth: {
-        user: 'apikey',
-        pass: process.env.SENDGRID_API_KEY,
-      },
-      // Removed Railway-specific timeouts to avoid TypeScript issues
-    });
-  } else if (process.env.EMAIL_SERVICE === 'smtp') {
-    console.log('📧 Using custom SMTP for email delivery');
-    return nodemailer.createTransport({  // Changed: removed 'er'
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT || '587'),
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-      // Removed Railway-specific settings that might cause TypeScript issues
-      tls: {
-        rejectUnauthorized: false,
-      },
-    });
-  } else {
-    console.log('📧 Using Gmail for email delivery (Railway optimized)');
-    return nodemailer.createTransport({  // Changed: removed 'er'
-      service: 'gmail',  // Use service instead of host for better compatibility
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASSWORD,
-      },
-      // Removed Railway-specific settings that might cause TypeScript issues
-      tls: {
-        rejectUnauthorized: false,
-      },
-    });
-  }
-};
-
-// Railway-optimized email sending with retry logic
+// Railway-optimized email sending with Resend
 async function sendConfirmationEmail(email: string, token: string, adminName: string): Promise<boolean> {
   const maxRetries = 3;
   let lastError: Error | null = null;
 
+  // Check if Resend API key is configured
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error('RESEND_API_KEY is not configured. Please add it to your Railway environment variables.');
+  }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    let transporter: Transporter | null = null;
-    
     try {
-      console.log(`📧 Railway email attempt ${attempt}/${maxRetries}`);
+      console.log(`📧 Resend email attempt ${attempt}/${maxRetries}`);
       
-      transporter = createEmailTransporter();
       const confirmationUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/admin/confirm-email?token=${token}`;
+      const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.EMAIL_FROM || 'onboarding@resend.dev';
       
-      // Skip connection test on Railway - it's causing the timeout
-      const isRailway = !!(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID);
-      
-      if (!isRailway) {
-        console.log('🔍 Testing SMTP connection...');
-        await Promise.race([
-          transporter.verify(),
-          new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Connection test timeout')), 8000)
-          )
-        ]);
-        console.log('✅ SMTP connection verified');
-      } else {
-        console.log('🚂 Railway detected - skipping connection test');
+      // Validate from email domain if using custom domain
+      if (!fromEmail.includes('@resend.dev') && !process.env.RESEND_VERIFIED_DOMAIN) {
+        console.warn('⚠️ Using custom domain without RESEND_VERIFIED_DOMAIN. Make sure your domain is verified in Resend.');
       }
 
-      const mailOptions = {
-        from: process.env.EMAIL_FROM || process.env.EMAIL_USER || 'aymanafcat@gmail.com',
-        to: email,
+      const { data, error } = await resend.emails.send({
+        from: fromEmail,
+        to: [email],
         subject: 'Confirm Your Admin Account',
         html: `
           <!DOCTYPE html>
@@ -106,13 +56,109 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
             <meta charset="utf-8">
             <title>Confirm Your Admin Account</title>
             <style>
-              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-              .header { background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-              .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px; }
-              .button { display: inline-block; background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 20px 0; }
-              .footer { text-align: center; margin-top: 30px; color: #666; font-size: 14px; }
-              .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 20px 0; }
+              body { 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; 
+                line-height: 1.6; 
+                color: #333; 
+                margin: 0; 
+                padding: 0; 
+                background-color: #f4f4f4;
+              }
+              .container { 
+                max-width: 600px; 
+                margin: 0 auto; 
+                background: white; 
+                border-radius: 12px; 
+                overflow: hidden; 
+                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+              }
+              .header { 
+                background: linear-gradient(135deg, #3B82F6, #6366F1); 
+                color: white; 
+                padding: 40px 30px; 
+                text-align: center; 
+              }
+              .header h1 { 
+                margin: 0 0 10px 0; 
+                font-size: 28px; 
+                font-weight: 700; 
+              }
+              .header p { 
+                margin: 0; 
+                opacity: 0.9; 
+                font-size: 16px; 
+              }
+              .content { 
+                padding: 40px 30px; 
+              }
+              .content h2 { 
+                color: #1f2937; 
+                margin: 0 0 20px 0; 
+                font-size: 24px; 
+              }
+              .content p { 
+                margin: 0 0 20px 0; 
+                color: #4b5563; 
+              }
+              .button-container { 
+                text-align: center; 
+                margin: 30px 0; 
+              }
+              .button { 
+                display: inline-block; 
+                background: linear-gradient(135deg, #3B82F6, #6366F1); 
+                color: white; 
+                padding: 16px 32px; 
+                text-decoration: none; 
+                border-radius: 8px; 
+                font-weight: 600; 
+                font-size: 16px;
+                transition: transform 0.2s ease;
+              }
+              .button:hover { 
+                transform: translateY(-1px); 
+              }
+              .warning { 
+                background: #fef3c7; 
+                border: 1px solid #f59e0b; 
+                padding: 16px; 
+                border-radius: 8px; 
+                margin: 25px 0; 
+              }
+              .warning strong { 
+                color: #92400e; 
+              }
+              .url-box { 
+                word-break: break-all; 
+                background: #f3f4f6; 
+                padding: 16px; 
+                border-radius: 6px; 
+                font-family: 'Monaco', 'Menlo', monospace; 
+                font-size: 14px; 
+                border: 1px solid #e5e7eb;
+              }
+              .feature-list { 
+                margin: 20px 0; 
+              }
+              .feature-list li { 
+                margin: 8px 0; 
+                color: #4b5563; 
+              }
+              .divider { 
+                margin: 30px 0; 
+                border: none; 
+                border-top: 1px solid #e5e7eb; 
+              }
+              .footer { 
+                text-align: center; 
+                padding: 30px; 
+                background: #f9fafb; 
+                color: #6b7280; 
+                font-size: 14px; 
+              }
+              .footer p { 
+                margin: 5px 0; 
+              }
             </style>
           </head>
           <body>
@@ -121,79 +167,77 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
                 <h1>🛡️ Admin Account Confirmation</h1>
                 <p>Welcome to the Admin Portal</p>
               </div>
+              
               <div class="content">
                 <h2>Hello ${adminName}!</h2>
-                <p>Thank you for registering as an administrator. To complete your account setup and activate your admin privileges, please confirm your email address.</p>
+                <p>Thank you for registering as an administrator. To complete your account setup and activate your admin privileges, please confirm your email address by clicking the button below.</p>
                 
-                <div style="text-align: center;">
+                <div class="button-container">
                   <a href="${confirmationUrl}" class="button">Confirm Admin Account</a>
                 </div>
                 
                 <div class="warning">
-                  <strong>⚠️ Important:</strong> This confirmation link will expire in 24 hours for security reasons.
+                  <strong>⚠️ Important Security Notice:</strong> This confirmation link will expire in 24 hours for security reasons. Please confirm your account promptly.
                 </div>
                 
-                <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
-                <p style="word-break: break-all; background: #e9ecef; padding: 10px; border-radius: 4px;">
-                  ${confirmationUrl}
-                </p>
+                <p>If the button above doesn't work, you can copy and paste this link into your browser:</p>
+                <div class="url-box">${confirmationUrl}</div>
                 
-                <hr style="margin: 30px 0; border: none; border-top: 1px solid #dee2e6;">
+                <hr class="divider">
                 
                 <h3>What happens after confirmation?</h3>
-                <ul>
-                  <li>✅ Your admin account will be activated</li>
-                  <li>🗄️ Your dedicated database schema will be initialized</li>
-                  <li>👥 You'll be able to manage users and system settings</li>
-                  <li>📊 Access to the admin dashboard will be granted</li>
+                <ul class="feature-list">
+                  <li>✅ Your admin account will be activated instantly</li>
+                  <li>🗄️ Your dedicated database schema will be fully initialized</li>
+                  <li>👥 You'll gain full access to user management and system settings</li>
+                  <li>📊 The complete admin dashboard will be unlocked</li>
+                  <li>🔒 Advanced security features will be enabled</li>
                 </ul>
                 
-                <p>If you didn't request this admin account, please ignore this email or contact our support team.</p>
+                <p><strong>Didn't request this account?</strong> If you didn't register for an admin account, please ignore this email or contact our support team immediately.</p>
               </div>
+              
               <div class="footer">
                 <p>© 2024 Admin Portal. All rights reserved.</p>
-                <p>This is an automated message, please do not reply to this email.</p>
+                <p>This is an automated message sent via Resend. Please do not reply to this email.</p>
+                <p>Powered by Railway + Resend</p>
               </div>
             </div>
           </body>
           </html>
         `,
-      };
+      });
 
-      // Send email with Railway-optimized timeout
-      console.log('📤 Sending confirmation email...');
-      const info = await Promise.race([
-        transporter.sendMail(mailOptions),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Email send timeout')), 20000)
-        )
-      ]) as any;
-      
-      console.log('✅ Confirmation email sent successfully:', info.messageId);
+      if (error) {
+        throw new Error(`Resend API error: ${error.message || JSON.stringify(error)}`);
+      }
+
+      console.log('✅ Confirmation email sent successfully via Resend:', data?.id);
       return true;
 
     } catch (error: any) {
       lastError = error;
-      console.error(`❌ Railway email attempt ${attempt} failed:`, error.message);
+      console.error(`❌ Resend attempt ${attempt} failed:`, error.message);
+      
+      // Log specific Resend errors for better debugging
+      if (error.message?.includes('API key')) {
+        console.error('🔑 Resend API Key Error: Check your RESEND_API_KEY environment variable');
+      } else if (error.message?.includes('domain')) {
+        console.error('🌐 Resend Domain Error: Verify your sending domain in Resend dashboard');
+      } else if (error.message?.includes('rate limit')) {
+        console.error('⏱️ Resend Rate Limit: You may have exceeded your plan limits');
+      }
       
       if (attempt < maxRetries) {
-        const waitTime = Math.min(2000 * attempt, 6000);
+        const waitTime = Math.min(1000 * attempt, 3000); // Shorter wait times for Resend
         console.log(`⏳ Waiting ${waitTime}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
-      }
-    } finally {
-      if (transporter && typeof transporter.close === 'function') {
-        try {
-          transporter.close();
-        } catch (closeError) {
-          console.warn('⚠️ Warning: Could not close email transporter:', closeError);
-        }
       }
     }
   }
 
-  console.error('❌ All Railway email attempts failed. Last error:', lastError?.message);
-  throw new Error(`Failed to send confirmation email: ${lastError?.message}`);
+  console.error('❌ All Resend email attempts failed. Last error:', lastError?.message);
+  throw new Error(`Failed to send confirmation email via Resend: ${lastError?.message}`);
 }
 
 // Types
@@ -466,7 +510,7 @@ async function verifyPhoneRegistration(phoneNumber: string): Promise<boolean> {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<AdminRegistrationResponse>> {
-  console.log('🚀 Starting Railway admin registration process...');
+  console.log('🚀 Starting Railway admin registration with Resend...');
   
   const connectionTest = await testPrismaConnection();
   if (!connectionTest) {
@@ -622,16 +666,16 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       adminUser = initResult.adminUser;
 
       if (isEmailRegistration && confirmationToken) {
-        console.log('📧 Sending Railway-optimized confirmation email...');
+        console.log('📧 Sending confirmation email via Resend...');
         try {
           await sendConfirmationEmail(
             adminEmail, 
             confirmationToken, 
             `${firstname} ${lastname}`
           );
-          console.log('✅ Railway confirmation email sent successfully');
+          console.log('✅ Resend confirmation email sent successfully');
         } catch (emailError: any) {
-          console.error('❌ Railway email failed:', emailError.message);
+          console.error('❌ Resend email failed:', emailError.message);
           console.warn('⚠️ Registration completed but confirmation email failed. Admin can request a new confirmation email.');
         }
       }
