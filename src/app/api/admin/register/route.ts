@@ -27,6 +27,13 @@ function generateOTP(): string {
 
 // Email configuration
 const createEmailTransporter = () => {
+  // Timeout configuration for Railway compatibility
+  const timeoutConfig = {
+    connectionTimeout: 1800000, // 3 minutes
+    greetingTimeout: 1200000,   // 2 minutes
+    socketTimeout: 1800000,     // 3 minutes
+  };
+
   if (process.env.EMAIL_SERVICE === 'sendgrid') {
     return nodemailer.createTransport({
       service: 'SendGrid',
@@ -34,6 +41,7 @@ const createEmailTransporter = () => {
         user: 'apikey',
         pass: process.env.SENDGRID_API_KEY,
       },
+      ...timeoutConfig,
     });
   } else if (process.env.EMAIL_SERVICE === 'smtp') {
     return nodemailer.createTransport({
@@ -44,6 +52,7 @@ const createEmailTransporter = () => {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS,
       },
+      ...timeoutConfig,
     });
   } else {
     console.log('📧 Using Gmail for email delivery');
@@ -53,6 +62,11 @@ const createEmailTransporter = () => {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASSWORD,
       },
+      ...timeoutConfig,
+      // Additional settings for Gmail reliability
+      pool: true,
+      maxConnections: 5,
+      maxMessages: 100,
     });
   }
 };
