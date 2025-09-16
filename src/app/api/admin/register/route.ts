@@ -1,4 +1,4 @@
-// app/api/admin/register/route.ts - Updated without admin code requirement
+// app/api/admin/register/route.ts - TypeScript-Safe Railway Version
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
@@ -6,6 +6,8 @@ import { Client } from 'pg';
 import { execSync } from 'child_process';
 import nodemailer from 'nodemailer';
 import { publicDb, createAdminEntry } from '@/lib/database-connection';
+import type { Transporter } from 'nodemailer';
+import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 
 // Test database connection on startup
 async function testPrismaConnection() {
@@ -20,30 +22,22 @@ async function testPrismaConnection() {
   }
 }
 
-// Helper function to generate OTP
-function generateOTP(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
-// Email configuration
-const createEmailTransporter = () => {
-  // Timeout configuration for Railway compatibility
-  const timeoutConfig = {
-    connectionTimeout: 1800000, // 3 minutes
-    greetingTimeout: 1200000,   // 2 minutes
-    socketTimeout: 1800000,     // 3 minutes
-  };
-
+// TypeScript-safe email configuration for Railway
+const createEmailTransporter = (): Transporter => {
   if (process.env.EMAIL_SERVICE === 'sendgrid') {
+    console.log('📧 Using SendGrid for email delivery');
     return nodemailer.createTransport({
       service: 'SendGrid',
       auth: {
         user: 'apikey',
         pass: process.env.SENDGRID_API_KEY,
       },
-      ...timeoutConfig,
+      connectionTimeout: 30000,
+      greetingTimeout: 15000,
+      socketTimeout: 30000,
     });
   } else if (process.env.EMAIL_SERVICE === 'smtp') {
+    console.log('📧 Using custom SMTP for email delivery');
     return nodemailer.createTransport({
       host: process.env.SMTP_HOST,
       port: parseInt(process.env.SMTP_PORT || '587'),
@@ -52,104 +46,158 @@ const createEmailTransporter = () => {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS,
       },
-      ...timeoutConfig,
+      connectionTimeout: 30000,
+      greetingTimeout: 15000,
+      socketTimeout: 30000,
+      tls: {
+        rejectUnauthorized: false,
+      },
     });
   } else {
-    console.log('📧 Using Gmail for email delivery');
+    console.log('📧 Using Gmail for email delivery (Railway optimized)');
+    // Use the service approach for Gmail which handles pooling automatically
     return nodemailer.createTransport({
       service: 'gmail',
       auth: {
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASSWORD,
       },
-      ...timeoutConfig,
-      // Additional settings for Gmail reliability
-      pool: true,
-      maxConnections: 5,
-      maxMessages: 100,
+      connectionTimeout: 30000,
+      greetingTimeout: 15000,
+      socketTimeout: 30000,
+      tls: {
+        rejectUnauthorized: false,
+      },
     });
   }
 };
 
-// Send confirmation email
-async function sendConfirmationEmail(email: string, token: string, adminName: string) {
-  try {
-    const transporter = createEmailTransporter();
-    const confirmationUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/admin/confirm-email?token=${token}`;
-    
-    const mailOptions = {
-      from: process.env.EMAIL_USER || 'aymanafcat@gmail.com',
-      to: email,
-      subject: 'Confirm Your Admin Account',
-      html: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="utf-8">
-          <title>Confirm Your Admin Account</title>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-            .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px; }
-            .button { display: inline-block; background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 20px 0; }
-            .footer { text-align: center; margin-top: 30px; color: #666; font-size: 14px; }
-            .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 20px 0; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="header">
-              <h1>🛡️ Admin Account Confirmation</h1>
-              <p>Welcome to the Admin Portal</p>
-            </div>
-            <div class="content">
-              <h2>Hello ${adminName}!</h2>
-              <p>Thank you for registering as an administrator. To complete your account setup and activate your admin privileges, please confirm your email address.</p>
-              
-              <div style="text-align: center;">
-                <a href="${confirmationUrl}" class="button">Confirm Admin Account</a>
-              </div>
-              
-              <div class="warning">
-                <strong>⚠️ Important:</strong> This confirmation link will expire in 24 hours for security reasons.
-              </div>
-              
-              <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
-              <p style="word-break: break-all; background: #e9ecef; padding: 10px; border-radius: 4px;">
-                ${confirmationUrl}
-              </p>
-              
-              <hr style="margin: 30px 0; border: none; border-top: 1px solid #dee2e6;">
-              
-              <h3>What happens after confirmation?</h3>
-              <ul>
-                <li>✅ Your admin account will be activated</li>
-                <li>🗄️ Your dedicated database schema will be initialized</li>
-                <li>👥 You'll be able to manage users and system settings</li>
-                <li>📊 Access to the admin dashboard will be granted</li>
-              </ul>
-              
-              <p>If you didn't request this admin account, please ignore this email or contact our support team.</p>
-            </div>
-            <div class="footer">
-              <p>© 2024 Admin Portal. All rights reserved.</p>
-              <p>This is an automated message, please do not reply to this email.</p>
-            </div>
-          </div>
-        </body>
-        </html>
-      `,
-    };
+// Railway-optimized email sending with retry logic
+async function sendConfirmationEmail(email: string, token: string, adminName: string): Promise<boolean> {
+  const maxRetries = 2;
+  let lastError: Error | null = null;
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log('✅ Confirmation email sent successfully:', info.messageId);
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let transporter: Transporter | null = null;
     
-    return true;
-  } catch (error) {
-    console.error('❌ Failed to send confirmation email:', error);
-    throw new Error('Failed to send confirmation email');
+    try {
+      console.log(`📧 Railway email attempt ${attempt}/${maxRetries}`);
+      
+      transporter = createEmailTransporter();
+      const confirmationUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/admin/confirm-email?token=${token}`;
+      
+      // Quick connection test with timeout
+      console.log('🔍 Testing SMTP connection...');
+      await Promise.race([
+        transporter.verify(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Connection test timeout after 10s')), 10000)
+        )
+      ]);
+      console.log('✅ SMTP connection verified');
+
+      const mailOptions = {
+        from: process.env.EMAIL_USER || 'aymanafcat@gmail.com',
+        to: email,
+        subject: 'Confirm Your Admin Account',
+        html: `
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <title>Confirm Your Admin Account</title>
+            <style>
+              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+              .header { background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
+              .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 10px 10px; }
+              .button { display: inline-block; background: linear-gradient(135deg, #3B82F6, #6366F1); color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; margin: 20px 0; }
+              .footer { text-align: center; margin-top: 30px; color: #666; font-size: 14px; }
+              .warning { background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 20px 0; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>🛡️ Admin Account Confirmation</h1>
+                <p>Welcome to the Admin Portal</p>
+              </div>
+              <div class="content">
+                <h2>Hello ${adminName}!</h2>
+                <p>Thank you for registering as an administrator. To complete your account setup and activate your admin privileges, please confirm your email address.</p>
+                
+                <div style="text-align: center;">
+                  <a href="${confirmationUrl}" class="button">Confirm Admin Account</a>
+                </div>
+                
+                <div class="warning">
+                  <strong>⚠️ Important:</strong> This confirmation link will expire in 24 hours for security reasons.
+                </div>
+                
+                <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
+                <p style="word-break: break-all; background: #e9ecef; padding: 10px; border-radius: 4px;">
+                  ${confirmationUrl}
+                </p>
+                
+                <hr style="margin: 30px 0; border: none; border-top: 1px solid #dee2e6;">
+                
+                <h3>What happens after confirmation?</h3>
+                <ul>
+                  <li>✅ Your admin account will be activated</li>
+                  <li>🗄️ Your dedicated database schema will be initialized</li>
+                  <li>👥 You'll be able to manage users and system settings</li>
+                  <li>📊 Access to the admin dashboard will be granted</li>
+                </ul>
+                
+                <p>If you didn't request this admin account, please ignore this email or contact our support team.</p>
+              </div>
+              <div class="footer">
+                <p>© 2024 Admin Portal. All rights reserved.</p>
+                <p>This is an automated message, please do not reply to this email.</p>
+              </div>
+            </div>
+          </body>
+          </html>
+        `,
+      };
+
+      // Send email with Railway-specific timeout
+      console.log('📤 Sending confirmation email...');
+      const info = await Promise.race([
+        transporter.sendMail(mailOptions),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Email send timeout after 25s')), 25000)
+        )
+      ]) as any;
+      
+      console.log('✅ Confirmation email sent successfully:', info.messageId);
+      
+      return true;
+
+    } catch (error: any) {
+      lastError = error;
+      console.error(`❌ Railway email attempt ${attempt} failed:`, error.message);
+      
+      if (attempt < maxRetries) {
+        const waitTime = Math.min(1000 * Math.pow(2, attempt - 1) + Math.random() * 1000, 5000);
+        console.log(`⏳ Waiting ${waitTime}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    } finally {
+      // Always close transporter to prevent connection leaks on Railway
+      if (transporter && typeof transporter.close === 'function') {
+        try {
+          transporter.close();
+        } catch (closeError) {
+          console.warn('⚠️ Warning: Could not close email transporter:', closeError);
+        }
+      }
+    }
   }
+
+  // All attempts failed
+  console.error('❌ All Railway email attempts failed. Last error:', lastError?.message);
+  throw new Error(`Failed to send confirmation email after ${maxRetries} attempts: ${lastError?.message}`);
 }
 
 // Types
@@ -374,7 +422,6 @@ function validateRequest(data: Partial<AdminRegistrationRequest>): string | null
     return 'Either email or phone number is required';
   }
 
-  // Email validation
   if (data.email && !isValidEmail(data.email)) {
     return 'Please provide a valid email address';
   }
@@ -395,13 +442,11 @@ async function verifyPhoneRegistration(phoneNumber: string): Promise<boolean> {
   try {
     console.log('🔍 Checking phone verification status for:', phoneNumber);
     
-    // Look for a recent, used OTP for this phone number
     const recentVerification = await publicDb.adminOTP.findFirst({
       where: {
         identifier: phoneNumber,
         type: 'phone',
-        usedAt: { not: null }, // Must be used
-        // Check if verification happened within last 10 minutes
+        usedAt: { not: null },
         createdAt: {
           gte: new Date(Date.now() - 10 * 60 * 1000)
         }
@@ -425,9 +470,8 @@ async function verifyPhoneRegistration(phoneNumber: string): Promise<boolean> {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse<AdminRegistrationResponse>> {
-  console.log('🚀 Starting admin registration process...');
+  console.log('🚀 Starting Railway admin registration process...');
   
-  // Test database connection first
   const connectionTest = await testPrismaConnection();
   if (!connectionTest) {
     return NextResponse.json<AdminRegistrationResponse>(
@@ -453,7 +497,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       database 
     } = body;
 
-    console.log('📥 Registration request:', {
+    console.log('📥 Railway registration request:', {
       firstname,
       lastname,
       email,
@@ -463,7 +507,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       hasDatabase: !!database
     });
 
-    // Basic validation
     const validationError = validateRequest(body);
     if (validationError) {
       return NextResponse.json(
@@ -472,13 +515,11 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       );
     }
 
-    // Determine registration method
     const isEmailRegistration = !!email;
     const isPhoneRegistration = !!phonenumber && !email;
 
     console.log('📝 Registration method:', isEmailRegistration ? 'EMAIL' : 'PHONE');
 
-    // For phone registrations, verify that the phone was actually verified
     if (isPhoneRegistration) {
       console.log('📱 Verifying phone registration...');
       const phoneIsVerified = await verifyPhoneRegistration(phonenumber);
@@ -495,13 +536,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       console.log('✅ Phone registration verified');
     }
 
-    // Prepare admin email
     const adminEmail = email || `${phonenumber}@phone.local`;
-
-    // Generate unique schema name
     const schemaName = database?.name || generateSchemaName(firstname, lastname);
     
-    // Prepare schema configuration
     const schemaConfig = {
       name: schemaName,
       displayName: database?.displayName || `${firstname} ${lastname}'s Workspace`,
@@ -510,7 +547,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       maxStorage: database?.maxStorage || 10.0
     };
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, 12);
 
     let createdAdmin: any;
@@ -518,11 +554,9 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
     let confirmationRecord: any;
 
     try {
-      // Generate confirmation token only for email registrations
       const confirmationToken = isEmailRegistration ? crypto.randomUUID() : null;
       const tokenExpiry = isEmailRegistration ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null;
 
-      // Step 1: Create admin in public schema
       console.log('👤 Creating admin in public schema...');
       createdAdmin = await createAdminEntry({
         firstname,
@@ -539,7 +573,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
       
       console.log(`✅ Admin created in public schema with ID: ${createdAdmin.id}`);
 
-      // Step 1.5: Create confirmation record only for email registrations
       if (isEmailRegistration && confirmationToken && tokenExpiry) {
         console.log('🔐 Creating email confirmation token...');
         confirmationRecord = await publicDb.adminConfirmation.create({
@@ -552,17 +585,15 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
         console.log('✅ Email confirmation token created');
       }
 
-      // Step 1.6: For phone registrations, mark the OTP as consumed for this admin
       if (isPhoneRegistration) {
         console.log('📱 Updating OTP record with admin ID...');
         
-        // Update the most recent used OTP record with the admin ID
         await publicDb.adminOTP.updateMany({
           where: {
             identifier: phonenumber,
             type: 'phone',
             usedAt: { not: null },
-            adminId: null // Only update records without admin ID
+            adminId: null
           },
           data: {
             adminId: createdAdmin.id
@@ -572,15 +603,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
         console.log('✅ Phone OTP record updated with admin ID');
       }
 
-      // Step 2: Create schema
       console.log('🗄️ Creating schema...');
       await createSchema(schemaName);
 
-      // Step 3: Apply schema migrations
       console.log('📋 Applying schema migrations...');
       await applySchemaToNewSchema(schemaName);
 
-      // Step 4: Initialize the new schema with admin user
       console.log('🔧 Initializing new schema with admin user...');
       const initResult = await initializeNewSchema(
         schemaName,
@@ -592,45 +620,43 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
           password: hashedPassword,
           role
         },
-        isPhoneRegistration // Pass whether this is a phone registration
+        isPhoneRegistration
       );
       
       adminUser = initResult.adminUser;
 
-      // Step 5: Send confirmation email only for email registrations
       if (isEmailRegistration && confirmationToken) {
-        console.log('📧 Sending confirmation email...');
+        console.log('📧 Sending Railway-optimized confirmation email...');
         try {
           await sendConfirmationEmail(
             adminEmail, 
             confirmationToken, 
             `${firstname} ${lastname}`
           );
-        } catch (emailError) {
-          console.error('❌ Failed to send confirmation email:', emailError);
-          // Don't fail the entire registration
+          console.log('✅ Railway confirmation email sent successfully');
+        } catch (emailError: any) {
+          console.error('❌ Railway email failed:', emailError.message);
+          console.warn('⚠️ Registration completed but confirmation email failed. Admin can request a new confirmation email.');
         }
       }
 
-      // Step 6: For phone registrations, auto-confirm the admin
       if (isPhoneRegistration) {
         console.log('📱 Auto-confirming phone registration...');
         await publicDb.admin.update({
           where: { id: createdAdmin.id },
           data: { 
             isActive: true,
-            // You might want to add a confirmed field to the Admin model
           }
         });
         console.log('✅ Phone registration auto-confirmed');
       }
 
     } catch (error: any) {
-      console.error('❌ Registration process failed:', error.message);
+      console.error('❌ Railway registration process failed:', error.message);
       
       // Cleanup logic
       try {
-        console.log('🧹 Attempting cleanup...');
+        console.log('🧹 Attempting Railway cleanup...');
         
         if (confirmationRecord) {
           await publicDb.adminConfirmation.delete({
@@ -644,7 +670,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
           });
         }
         
-        // Cleanup schema
         const client = new Client({
           host: process.env.DB_HOST || 'localhost',
           port: parseInt(process.env.DB_PORT || '5432'),
@@ -662,19 +687,17 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
           await publicDb.admin.delete({ where: { id: createdAdmin.id } });
         }
         
-        console.log('✅ Cleanup completed');
+        console.log('✅ Railway cleanup completed');
       } catch (cleanupError) {
-        console.error('❌ Cleanup failed:', cleanupError);
+        console.error('❌ Railway cleanup failed:', cleanupError);
       }
       
       throw error;
     }
 
-    console.log('🎉 Admin registration completed successfully!');
+    console.log('🎉 Railway admin registration completed successfully!');
 
-    // Return response based on registration method
     if (isEmailRegistration && confirmationRecord) {
-      // Email registration - needs confirmation
       return NextResponse.json<AdminRegistrationResponse>({
         success: true,
         requiresConfirmation: true,
@@ -694,7 +717,6 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
         }
       }, { status: 201 });
     } else {
-      // Phone registration - auto-confirmed
       return NextResponse.json<AdminRegistrationResponse>({
         success: true,
         requiresConfirmation: false,
@@ -726,7 +748,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AdminRegi
     }
 
   } catch (error: any) {
-    console.error('❌ Admin registration error:', error);
+    console.error('❌ Railway admin registration error:', error);
 
     if (error.message.includes('connection') || error.message.includes('Authentication failed')) {
       return NextResponse.json<AdminRegistrationResponse>(
