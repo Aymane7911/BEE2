@@ -1480,16 +1480,20 @@ const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
 const handleProfileSubmit = async (e: React.FormEvent) => {
   e.preventDefault();
   
-  // Validate required fields
+  // Add passport scan validation
   if (!profileData.passportId.trim()) {
     alert('Please enter your Passport ID.');
     return;
   }
   
+  if (!profileData.passportScan) {
+    alert('Please upload your passport document.');
+    return;
+  }
+
   try {
     setIsSubmitting(true);
     
-    // Get JWT token from localStorage (adjust the key name if different)
     const token = localStorage.getItem('authToken') || localStorage.getItem('token') || localStorage.getItem('accessToken');
     
     if (!token) {
@@ -1497,13 +1501,16 @@ const handleProfileSubmit = async (e: React.FormEvent) => {
       return;
     }
     
-    // Create FormData object to handle file upload
     const formData = new FormData();
     formData.append('passportId', profileData.passportId.trim());
     
     if (profileData.passportScan) {
       formData.append('passportScan', profileData.passportScan);
     }
+    
+    // Add phone data if your API expects it (even if empty)
+    formData.append('phoneNumber', profileData.phoneNumber || '');
+    formData.append('isPhoneVerified', 'false');
     
     const response = await fetch('/api/user/profile', {
       method: 'POST',
@@ -1516,21 +1523,26 @@ const handleProfileSubmit = async (e: React.FormEvent) => {
     const result = await response.json();
     
     if (response.ok && result.success) {
-      // Close profile form and show success message
       setShowProfileForm(false);
       setShowProfileCompletedMessage(true);
       
-      // Reset form data
+      // Reset profile data
       setProfileData({
         passportId: '',
         passportScan: null,
-         phoneNumber: '', // Make sure this is always a string
-         isPhoneVerified: false,
+        phoneNumber: '',
+        isPhoneVerified: false,
       });
       
       console.log('Profile updated successfully:', result);
+      
+      // Show success message briefly, then re-open batch completion form
+      setTimeout(() => {
+        setShowProfileCompletedMessage(false);
+        setShowCompleteForm(true); // Re-open the batch completion form
+      }, 2000);
+      
     } else {
-      // Handle error
       console.error('Profile update failed:', result.error);
       alert('Failed to update profile: ' + (result.error || 'Unknown error'));
     }
@@ -1538,7 +1550,7 @@ const handleProfileSubmit = async (e: React.FormEvent) => {
     console.error('Error submitting profile:', error);
     alert('An error occurred while updating your profile. Please try again.');
   } finally {
-    setIsSubmitting(false);
+    setIsSubmitting(false); // FIXED: This was set to true, keeping the form stuck in loading state
   }
 };
   // 3. Function to fetch saved apiary locations

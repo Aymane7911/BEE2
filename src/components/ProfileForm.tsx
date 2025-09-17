@@ -173,96 +173,96 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
   };
 
   const sendOTP = async () => {
-  if (!profileData.phoneNumber?.trim()) {
-    setError('Please enter your phone number');
-    return;
-  }
+    if (!profileData.phoneNumber?.trim()) {
+      setError('Please enter your phone number');
+      return;
+    }
 
-  setOtpLoading(true);
-  setError(null);
+    setOtpLoading(true);
+    setError(null);
 
-  try {
-    const { getAuth, signInWithPhoneNumber, RecaptchaVerifier } = await import('firebase/auth');
-    const auth = getAuth();
+    try {
+      const { getAuth, signInWithPhoneNumber, RecaptchaVerifier } = await import('firebase/auth');
+      const auth = getAuth();
 
-    // Clean up existing reCAPTCHA verifier first
-    if (window.recaptchaVerifier) {
-      try {
-        await window.recaptchaVerifier.clear();
-        window.recaptchaVerifier = null;
-      } catch (error) {
-        console.log('Error clearing existing reCAPTCHA:', error);
+      // Clean up existing reCAPTCHA verifier first
+      if (window.recaptchaVerifier) {
+        try {
+          await window.recaptchaVerifier.clear();
+          window.recaptchaVerifier = null;
+        } catch (error) {
+          console.log('Error clearing existing reCAPTCHA:', error);
+        }
       }
-    }
 
-    // Clear the container content to ensure clean state
-    if (recaptchaContainer) {
-      recaptchaContainer.innerHTML = '';
-    }
-
-    // Wait a moment before creating new verifier
-    await new Promise(resolve => setTimeout(resolve, 100));
-
-    // Create new reCAPTCHA verifier only if none exists
-    if (!window.recaptchaVerifier && recaptchaContainer) {
-      try {
-        window.recaptchaVerifier = new RecaptchaVerifier(auth, recaptchaContainer, {
-          size: 'invisible',
-          callback: () => {
-            console.log('reCAPTCHA solved');
-          },
-          'expired-callback': () => {
-            console.log('reCAPTCHA expired');
-            window.recaptchaVerifier = null;
-          }
-        });
-      } catch (recaptchaError) {
-        console.error('reCAPTCHA creation error:', recaptchaError);
-        throw new Error('Failed to initialize phone verification. Please refresh the page.');
+      // Clear the container content to ensure clean state
+      if (recaptchaContainer) {
+        recaptchaContainer.innerHTML = '';
       }
-    }
 
-    if (!window.recaptchaVerifier) {
-      throw new Error('Failed to initialize reCAPTCHA. Please refresh and try again.');
-    }
+      // Wait a moment before creating new verifier
+      await new Promise(resolve => setTimeout(resolve, 100));
 
-    const confirmationResult = await signInWithPhoneNumber(
-      auth,
-      profileData.phoneNumber,
-      window.recaptchaVerifier
-    );
-
-    window.confirmationResult = confirmationResult;
-    setShowOtpInput(true);
-    setCountdown(60);
-    setSuccess('OTP sent successfully! Check your messages.');
-  } catch (error: any) {
-    console.error('OTP sending error:', error);
-    
-    // Handle specific Firebase errors
-    if (error.code === 'auth/billing-not-enabled') {
-      setError('Phone verification is not enabled. Please contact support.');
-    } else if (error.code === 'auth/invalid-phone-number') {
-      setError('Please enter a valid phone number with country code (e.g., +971501234567)');
-    } else if (error.code === 'auth/quota-exceeded') {
-      setError('Too many requests. Please try again later.');
-    } else {
-      setError(error.message || 'Failed to send OTP. Please try again.');
-    }
-    
-    // Clean up reCAPTCHA on error
-    if (window.recaptchaVerifier) {
-      try {
-        await window.recaptchaVerifier.clear();
-        window.recaptchaVerifier = null;
-      } catch (clearError) {
-        console.error('reCAPTCHA clear error:', clearError);
+      // Create new reCAPTCHA verifier only if none exists
+      if (!window.recaptchaVerifier && recaptchaContainer) {
+        try {
+          window.recaptchaVerifier = new RecaptchaVerifier(auth, recaptchaContainer, {
+            size: 'invisible',
+            callback: () => {
+              console.log('reCAPTCHA solved');
+            },
+            'expired-callback': () => {
+              console.log('reCAPTCHA expired');
+              window.recaptchaVerifier = null;
+            }
+          });
+        } catch (recaptchaError) {
+          console.error('reCAPTCHA creation error:', recaptchaError);
+          throw new Error('Failed to initialize phone verification. Please refresh the page.');
+        }
       }
+
+      if (!window.recaptchaVerifier) {
+        throw new Error('Failed to initialize reCAPTCHA. Please refresh and try again.');
+      }
+
+      const confirmationResult = await signInWithPhoneNumber(
+        auth,
+        profileData.phoneNumber,
+        window.recaptchaVerifier
+      );
+
+      window.confirmationResult = confirmationResult;
+      setShowOtpInput(true);
+      setCountdown(60);
+      setSuccess('OTP sent successfully! Check your messages.');
+    } catch (error: any) {
+      console.error('OTP sending error:', error);
+      
+      // Handle specific Firebase errors
+      if (error.code === 'auth/billing-not-enabled') {
+        setError('Phone verification is not enabled. Please contact support.');
+      } else if (error.code === 'auth/invalid-phone-number') {
+        setError('Please enter a valid phone number with country code (e.g., +971501234567)');
+      } else if (error.code === 'auth/quota-exceeded') {
+        setError('Too many requests. Please try again later.');
+      } else {
+        setError(error.message || 'Failed to send OTP. Please try again.');
+      }
+      
+      // Clean up reCAPTCHA on error
+      if (window.recaptchaVerifier) {
+        try {
+          await window.recaptchaVerifier.clear();
+          window.recaptchaVerifier = null;
+        } catch (clearError) {
+          console.error('reCAPTCHA clear error:', clearError);
+        }
+      }
+    } finally {
+      setOtpLoading(false);
     }
-  } finally {
-    setOtpLoading(false);
-  }
-};
+  };
 
   const verifyOTP = async () => {
     if (!otp.trim()) {
@@ -295,8 +295,20 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
   const handleProfileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    console.log('Form submit started', { profileData, submitLoading });
+    
     if (externalHandleProfileSubmit) {
-      await externalHandleProfileSubmit(e);
+      console.log('Using external submit handler');
+      try {
+        await externalHandleProfileSubmit(e);
+      } catch (error) {
+        console.error('External submit handler error:', error);
+      }
+      return;
+    }
+
+    if (submitLoading) {
+      console.log('Already submitting, returning early');
       return;
     }
 
@@ -305,6 +317,8 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
     setSuccess(null);
 
     try {
+      console.log('Starting validation');
+      
       // Validate required fields
       if (!profileData.passportId.trim()) {
         throw new Error('Passport ID is required');
@@ -314,19 +328,39 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
         throw new Error('Passport document is required');
       }
 
-      if (!profileData.phoneNumber.trim()) {
-        throw new Error('Phone number is required');
-      }
+      // Skip phone verification for now since it's hidden
+      // if (!profileData.phoneNumber.trim()) {
+      //   throw new Error('Phone number is required');
+      // }
 
-      if (!profileData.isPhoneVerified) {
-        throw new Error('Phone number must be verified');
+      // if (!profileData.isPhoneVerified) {
+      //   throw new Error('Phone number must be verified');
+      // }
+
+      console.log('Validation passed, creating form data');
+
+      // Get authentication token
+      const token = localStorage.getItem('authtoken') ||
+                    localStorage.getItem('auth_token') ||
+                    localStorage.getItem('token') ||
+                    sessionStorage.getItem('authtoken') ||
+                    sessionStorage.getItem('auth_token') ||
+                    sessionStorage.getItem('token');
+
+      if (!token) {
+        throw new Error('No authentication token found. Please log in again.');
       }
 
       // Create form data for file upload
       const formData = new FormData();
       formData.append('passportId', profileData.passportId.trim());
-      formData.append('phoneNumber', profileData.phoneNumber.trim());
-      formData.append('isPhoneVerified', profileData.isPhoneVerified.toString());
+      
+      // Only append phone data if provided (since it's now optional)
+      if (profileData.phoneNumber?.trim()) {
+        formData.append('phoneNumber', profileData.phoneNumber.trim());
+        formData.append('isPhoneVerified', profileData.isPhoneVerified.toString());
+      }
+      
       formData.append('passportScan', profileData.passportScan);
       
       // Add profile photo if provided
@@ -334,43 +368,56 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
         formData.append('profilePhoto', profilePhoto);
       }
 
-      // Submit to API
+      console.log('Sending request to API');
+
+      // Submit to API with authentication
       const response = await fetch('/api/user/profile', {
         method: 'POST',
         body: formData,
-        credentials: 'include',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
       });
 
+      console.log('API response status:', response.status);
+
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await response.json().catch(() => ({ error: `HTTP error! status: ${response.status}` }));
+        console.error('API error response:', errorData);
         throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
       }
 
       const result = await response.json();
+      console.log('API success response:', result);
+      
       setSuccess('Profile updated successfully!');
       
       // Call success callback if provided
       if (onSuccess) {
+        console.log('Calling onSuccess callback');
         onSuccess();
       }
 
       // Close modal after a short delay
       setTimeout(() => {
+        console.log('Closing modal');
         setShow(false);
         setSuccess(null);
-      }, 2000);
+      }, 1500);
 
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update profile');
+      console.error('Profile submission error:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Failed to update profile';
+      setError(errorMessage);
     } finally {
       setSubmitLoading(false);
+      console.log('Submit completed');
     }
   };
 
-  const isFormValid = profileData.passportId.trim() && 
-                      profileData.passportScan && 
-                      profileData.phoneNumber.trim() && 
-                      profileData.isPhoneVerified;
+  // Updated validation - phone verification is now optional
+  const isFormValid = profileData.passportId.trim() && profileData.passportScan;
+  // Removed phone verification requirement: && profileData.phoneNumber.trim() && profileData.isPhoneVerified;
 
   if (!show) return null;
 
@@ -419,22 +466,9 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
             </div>
             <div className="flex items-center space-x-2">
               <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
-                profileData.isPhoneVerified ? 'bg-green-500 text-white' : 'bg-gray-300 text-gray-500'
-              }`}>
-                {profileData.isPhoneVerified ? <CheckCircle2 className="h-4 w-4" /> : '2'}
-              </div>
-              <span className="text-sm font-medium">Phone Verification</span>
-            </div>
-            <div className="flex-1 h-0.5 bg-gray-300">
-              <div className={`h-full transition-all duration-300 ${
-                profileData.isPhoneVerified ? 'bg-green-500 w-full' : 'bg-blue-500 w-0'
-              }`} />
-            </div>
-            <div className="flex items-center space-x-2">
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
                 profileData.passportScan ? 'bg-green-500 text-white' : 'bg-gray-300 text-gray-500'
               }`}>
-                {profileData.passportScan ? <CheckCircle2 className="h-4 w-4" /> : '3'}
+                {profileData.passportScan ? <CheckCircle2 className="h-4 w-4" /> : '2'}
               </div>
               <span className="text-sm font-medium">Document Upload</span>
             </div>
@@ -537,127 +571,6 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
                         className="hidden"
                       />
                     </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Section 2: Phone Verification */}
-            <div className="mb-8">
-              <div className="flex items-center mb-4">
-                <div className="bg-green-100 p-2 rounded-lg mr-3">
-                  <Phone className="h-5 w-5 text-green-600" />
-                </div>
-                <h4 className="text-lg font-semibold text-gray-800">Phone Verification</h4>
-              </div>
-              
-              <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-200">
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Phone Number *
-                    </label>
-                    <div className="flex space-x-3">
-                      <div className="flex-1">
-                        <input
-                          type="tel"
-                          value={profileData.phoneNumber}
-                          onChange={(e) => handleProfileChange('phoneNumber', e.target.value)}
-                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                          placeholder="+971 50 123 4567"
-                          required
-                          disabled={profileData.isPhoneVerified}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={sendOTP}
-                        disabled={otpLoading || !profileData.phoneNumber.trim() || profileData.isPhoneVerified || countdown > 0}
-                        className={`px-4 py-3 rounded-lg text-white font-medium transition-colors ${
-                          otpLoading || !profileData.phoneNumber.trim() || profileData.isPhoneVerified || countdown > 0
-                            ? 'bg-gray-300 cursor-not-allowed'
-                            : 'bg-blue-500 hover:bg-blue-600'
-                        }`}
-                      >
-                        {otpLoading ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : countdown > 0 ? (
-                          `${countdown}s`
-                        ) : profileData.isPhoneVerified ? (
-                          <CheckCircle2 className="h-4 w-4" />
-                        ) : (
-                          'Send OTP'
-                        )}
-                      </button>
-                    </div>
-
-                    {showOtpInput && !profileData.isPhoneVerified && (
-                      <div className="mt-4">
-                        <label className="block text-sm font-medium text-gray-700 mb-2">
-                          Enter OTP Code
-                        </label>
-                        <div className="flex space-x-3">
-                          <div className="flex-1">
-                            <input
-                              type="text"
-                              value={otp}
-                              onChange={(e) => setOtp(e.target.value)}
-                              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-                              placeholder="Enter 6-digit code"
-                              maxLength={6}
-                            />
-                          </div>
-                          <button
-                            type="button"
-                            onClick={verifyOTP}
-                            disabled={verifyLoading || !otp.trim()}
-                            className={`px-4 py-3 rounded-lg text-white font-medium transition-colors ${
-                              verifyLoading || !otp.trim()
-                                ? 'bg-gray-300 cursor-not-allowed'
-                                : 'bg-green-500 hover:bg-green-600'
-                            }`}
-                          >
-                            {verifyLoading ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              'Verify'
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {profileData.isPhoneVerified && (
-                      <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-center">
-                        <CheckCircle2 className="h-5 w-5 text-green-500 mr-2" />
-                        <span className="text-green-700 text-sm">Phone number verified successfully</span>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="bg-gradient-to-br from-green-50 to-blue-50 p-6 rounded-xl border border-green-200">
-                    <div className="flex items-center mb-3">
-                      <MessageSquare className="h-5 w-5 text-green-600 mr-2" />
-                      <h4 className="font-semibold text-green-800">Phone Verification</h4>
-                    </div>
-                    <ul className="space-y-2 text-sm text-green-700">
-                      <li className="flex items-start">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mr-2 mt-0.5 flex-shrink-0" />
-                        <span>Secure SMS verification via Firebase</span>
-                      </li>
-                      <li className="flex items-start">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mr-2 mt-0.5 flex-shrink-0" />
-                        <span>Required for certificate authentication</span>
-                      </li>
-                      <li className="flex items-start">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mr-2 mt-0.5 flex-shrink-0" />
-                        <span>Helps prevent fraudulent certificates</span>
-                      </li>
-                      <li className="flex items-start">
-                        <CheckCircle2 className="h-4 w-4 text-green-500 mr-2 mt-0.5 flex-shrink-0" />
-                        <span>One-time verification process</span>
-                      </li>
-                    </ul>
                   </div>
                 </div>
               </div>
@@ -811,7 +724,7 @@ const ProfileForm: React.FC<ProfileFormProps> = ({
             <div className="bg-white rounded-lg p-6 shadow-sm border border-gray-200">
               <div className="flex justify-between items-center">
                 <div className="text-sm text-gray-600">
-                  <span className="font-medium">Required fields:</span> Passport ID, Phone verification, Document scan
+                  <span className="font-medium">Required fields:</span> Passport ID, Document scan
                 </div>
                 
                 <div className="flex space-x-3">
