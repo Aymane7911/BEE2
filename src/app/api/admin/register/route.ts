@@ -38,7 +38,7 @@ async function sendConfirmationEmail(email: string, token: string, adminName: st
       console.log(`📧 Resend email attempt ${attempt}/${maxRetries}`);
       
       const confirmationUrl = `${process.env.NEXTAUTH_URL || 'http://localhost:3000'}/admin/confirm-email?token=${token}`;
-      const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.EMAIL_FROM || 'onboarding@resend.dev';
+      const fromEmail = process.env.RESEND_FROM_EMAIL || process.env.EMAIL_FROM || 'noreply@honexis.com';
       
       // Validate from email domain if using custom domain
       if (!fromEmail.includes('@resend.dev') && !process.env.RESEND_VERIFIED_DOMAIN) {
