@@ -606,8 +606,8 @@ const addJarToBatch = (sizeInGrams: number, quantity: number) => {
   setNewJarQuantity(1);
 };
 
-const web3 = new Web3("http://127.0.0.1:8545");
-  const contract = new web3.eth.Contract(contractABI,process.env.NEXT_PUBLIC_HARDHAT_ACCOUNT);
+const web3 = new Web3(`https://sepolia.infura.io/v3/${process.env.NEXT_PUBLIC_INFURA_API_KEY}`);
+const contract = new web3.eth.Contract(contractABI, process.env.NEXT_PUBLIC_CONTRACT_ADDRESS);
 
 
 

@@ -119,40 +119,40 @@ const [userPremiumData, setUserPremiumData] = useState<UserPremiumData | null>(n
           
           {/* Navigation Menu - Scrollable */}
           <div className="flex-1 overflow-y-auto">
-           <nav className="mt-6 px-4 pb-6">
-    <ul className="space-y-3">
-      {[
-        { icon: Home, label: 'Dashboard', href: '/dashboard', locked: false },
-        { icon: Layers, label: 'Batches', href: '/batches', locked: false },
-        { icon: Activity, label: 'Analytics', href: '/analytics', locked: !isUserPremium },
-        { icon: Users, label: 'Profile', href: '/profile', locked: false },
-        // { icon: HelpCircle, label: 'Help', href: '#', locked: false } // 🔒 Hidden Help section
-      ].map((item, index) => (
-        <li key={index}>
-          {item.locked ? (
-            <button 
-              onClick={item.label === 'Analytics' ? handleAnalyticsClick : undefined}
-              className="group flex items-center justify-between w-full px-4 py-4 rounded-xl hover:bg-gradient-to-r hover:from-amber-500/10 hover:to-yellow-500/10 transition-all duration-300 cursor-pointer border border-amber-500/30"
-            >
-              <div className="flex items-center">
-                <item.icon className="h-6 w-6 mr-4 transition-all duration-300 text-amber-400" />
-                <span className="font-medium text-amber-300">{item.label}</span>
-              </div>
-              <div className="flex items-center space-x-2">
-                <Crown className="h-4 w-4 text-amber-400" />
-                <Lock className="h-4 w-4 text-amber-400" />
-              </div>
-            </button>
-          ) : (
-            <a href={item.href} className="group flex items-center px-4 py-4 rounded-xl hover:bg-gradient-to-r hover:from-yellow-500/20 hover:to-amber-500/20 transition-all duration-300 transform hover:translate-x-2">
-              <item.icon className="h-6 w-6 mr-4 transition-all duration-300 group-hover:text-yellow-400 group-hover:scale-110" />
-              <span className="font-medium group-hover:text-yellow-300 transition-colors duration-300">{item.label}</span>
-            </a>
-          )}
-        </li>
-      ))}
-    </ul>
-  </nav>
+            <nav className="mt-6 px-4 pb-6">
+              <ul className="space-y-3">
+                {[
+                  { icon: Home, label: 'Dashboard', href: '/dashboard', locked: false },
+                  { icon: Layers, label: 'Batches', href: '/batches', locked: false },
+                  { icon: Activity, label: 'Analytics', href: '/analytics', locked: !isUserPremium },
+                  { icon: Users, label: 'Profile', href: '/profile', locked: false },
+                  { icon: HelpCircle, label: 'Help', href: '#', locked: false }
+                ].map((item, index) => (
+                  <li key={index}>
+                    {item.locked ? (
+                      <button 
+                        onClick={item.label === 'Analytics' ? handleAnalyticsClick : undefined}
+                        className="group flex items-center justify-between w-full px-4 py-4 rounded-xl hover:bg-gradient-to-r hover:from-amber-500/10 hover:to-yellow-500/10 transition-all duration-300 cursor-pointer border border-amber-500/30"
+                      >
+                        <div className="flex items-center">
+                          <item.icon className="h-6 w-6 mr-4 transition-all duration-300 text-amber-400" />
+                          <span className="font-medium text-amber-300">{item.label}</span>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <Crown className="h-4 w-4 text-amber-400" />
+                          <Lock className="h-4 w-4 text-amber-400" />
+                        </div>
+                      </button>
+                    ) : (
+                      <a href={item.href} className="group flex items-center px-4 py-4 rounded-xl hover:bg-gradient-to-r hover:from-yellow-500/20 hover:to-amber-500/20 transition-all duration-300 transform hover:translate-x-2">
+                        <item.icon className="h-6 w-6 mr-4 transition-all duration-300 group-hover:text-yellow-400 group-hover:scale-110" />
+                        <span className="font-medium group-hover:text-yellow-300 transition-colors duration-300">{item.label}</span>
+                      </a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </nav>
           </div>
           
           
